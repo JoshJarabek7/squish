@@ -622,13 +622,19 @@ export function Canvas({
   };
 
   const handleResizeStart = (
-    e: React.MouseEvent<HTMLDivElement>,
+    e: React.MouseEvent,
     handle: 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
   ) => {
     if (!selectedLayerId) return;
 
     e.stopPropagation();
     e.preventDefault();
+
+    // Make sure we're not dragging
+    if (isDragging) {
+      setIsDragging(false);
+      setDragLayer(null);
+    }
 
     const layer = layerData.find((l) => l.id === selectedLayerId);
     if (!layer) return;
@@ -696,7 +702,11 @@ export function Canvas({
         zIndex: layerIndex * 10,
       },
       onClick: (e: React.MouseEvent) => handleLayerClick(e, layer.id),
-      onMouseDown: (e: React.MouseEvent) => handleMouseDown(e, layer),
+      onMouseDown: (e: React.MouseEvent) => {
+        // Prevent drag start if we're resizing
+        if (isResizing) return;
+        handleMouseDown(e, layer);
+      },
     };
 
     switch (layer.type) {
@@ -735,44 +745,98 @@ export function Canvas({
               draggable={false}
             />
             {/* Selection border */}
-            {isSelected && (
+            {selectedLayerId === layer.id && (
               <>
                 <div className='absolute -inset-[4px] z-selection pointer-events-none overflow-visible'>
                   <div className='absolute inset-0 rainbow-border' />
                 </div>
                 {/* Resize handles */}
-                <div
-                  className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-nw-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'nw')}
-                />
-                <div
-                  className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-ne-resize transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'ne')}
-                />
-                <div
-                  className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-sw-resize transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'sw')}
-                />
-                <div
-                  className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-se-resize transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'se')}
-                />
-                <div
-                  className='absolute top-1/2 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-w-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'w')}
-                />
-                <div
-                  className='absolute top-1/2 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-e-resize transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'e')}
-                />
-                <div
-                  className='absolute -top-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full cursor-n-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'n')}
-                />
-                <div
-                  className='absolute -bottom-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full cursor-s-resize transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 's')}
-                />
+                {(() => {
+                  const isFlippedX = (layer.transform.scaleX ?? 1) < 0;
+                  const isFlippedY = (layer.transform.scaleY ?? 1) < 0;
+
+                  // Adjust cursor directions based on flip state
+                  const getCursor = (handle: string) => {
+                    switch (handle) {
+                      case 'nw':
+                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}-resize`;
+                      case 'ne':
+                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}-resize`;
+                      case 'sw':
+                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}-resize`;
+                      case 'se':
+                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}-resize`;
+                      case 'n':
+                        return `${isFlippedY ? 's' : 'n'}-resize`;
+                      case 's':
+                        return `${isFlippedY ? 'n' : 's'}-resize`;
+                      case 'e':
+                        return `${isFlippedX ? 'w' : 'e'}-resize`;
+                      case 'w':
+                        return `${isFlippedX ? 'e' : 'w'}-resize`;
+                      default:
+                        return 'move';
+                    }
+                  };
+
+                  // Adjust handle type based on flip state
+                  const getHandle = (handle: string) => {
+                    switch (handle) {
+                      case 'nw':
+                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}`;
+                      case 'ne':
+                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}`;
+                      case 'sw':
+                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}`;
+                      case 'se':
+                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}`;
+                      default:
+                        return handle;
+                    }
+                  };
+
+                  return (
+                    <>
+                      {/* Corner handles - always shown */}
+                      <div
+                        className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                        style={{ cursor: getCursor('nw') }}
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          handleResizeStart(e, getHandle('nw') as any);
+                        }}
+                      />
+                      <div
+                        className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                        style={{ cursor: getCursor('ne') }}
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          handleResizeStart(e, getHandle('ne') as any);
+                        }}
+                      />
+                      <div
+                        className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                        style={{ cursor: getCursor('sw') }}
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          handleResizeStart(e, getHandle('sw') as any);
+                        }}
+                      />
+                      <div
+                        className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                        style={{ cursor: getCursor('se') }}
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          handleResizeStart(e, getHandle('se') as any);
+                        }}
+                      />
+                    </>
+                  );
+                })()}
               </>
             )}
           </div>
@@ -947,38 +1011,134 @@ export function Canvas({
                   <div className='absolute inset-0 rainbow-border' />
                 </div>
                 {/* Resize handles */}
-                <div
-                  className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-nw-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'nw')}
-                />
-                <div
-                  className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-ne-resize transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'ne')}
-                />
-                <div
-                  className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-sw-resize transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'sw')}
-                />
-                <div
-                  className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-se-resize transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'se')}
-                />
-                <div
-                  className='absolute top-1/2 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-w-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'w')}
-                />
-                <div
-                  className='absolute top-1/2 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-e-resize transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'e')}
-                />
-                <div
-                  className='absolute -top-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full cursor-n-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 'n')}
-                />
-                <div
-                  className='absolute -bottom-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full cursor-s-resize transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                  onMouseDown={(e) => handleResizeStart(e, 's')}
-                />
+                {(() => {
+                  const isFlippedX = (layer.transform.scaleX ?? 1) < 0;
+                  const isFlippedY = (layer.transform.scaleY ?? 1) < 0;
+
+                  // Adjust cursor directions based on flip state
+                  const getCursor = (handle: string) => {
+                    switch (handle) {
+                      case 'nw':
+                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}-resize`;
+                      case 'ne':
+                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}-resize`;
+                      case 'sw':
+                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}-resize`;
+                      case 'se':
+                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}-resize`;
+                      case 'n':
+                        return `${isFlippedY ? 's' : 'n'}-resize`;
+                      case 's':
+                        return `${isFlippedY ? 'n' : 's'}-resize`;
+                      case 'e':
+                        return `${isFlippedX ? 'w' : 'e'}-resize`;
+                      case 'w':
+                        return `${isFlippedX ? 'e' : 'w'}-resize`;
+                      default:
+                        return 'move';
+                    }
+                  };
+
+                  // Adjust handle type based on flip state
+                  const getHandle = (handle: string) => {
+                    switch (handle) {
+                      case 'nw':
+                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}`;
+                      case 'ne':
+                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}`;
+                      case 'sw':
+                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}`;
+                      case 'se':
+                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}`;
+                      default:
+                        return handle;
+                    }
+                  };
+
+                  return (
+                    <>
+                      {/* Corner handles - always shown */}
+                      <div
+                        className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                        style={{ cursor: getCursor('nw') }}
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          handleResizeStart(e, getHandle('nw') as any);
+                        }}
+                      />
+                      <div
+                        className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                        style={{ cursor: getCursor('ne') }}
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          handleResizeStart(e, getHandle('ne') as any);
+                        }}
+                      />
+                      <div
+                        className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                        style={{ cursor: getCursor('sw') }}
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          handleResizeStart(e, getHandle('sw') as any);
+                        }}
+                      />
+                      <div
+                        className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                        style={{ cursor: getCursor('se') }}
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          handleResizeStart(e, getHandle('se') as any);
+                        }}
+                      />
+
+                      {/* Edge handles - only shown for text layers */}
+                      {layer.type === 'text' && (
+                        <>
+                          <div
+                            className='absolute top-1/2 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('w') }}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              handleResizeStart(e, getHandle('w') as any);
+                            }}
+                          />
+                          <div
+                            className='absolute top-1/2 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('e') }}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              handleResizeStart(e, getHandle('e') as any);
+                            }}
+                          />
+                          <div
+                            className='absolute -top-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('n') }}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              handleResizeStart(e, getHandle('n') as any);
+                            }}
+                          />
+                          <div
+                            className='absolute -bottom-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('s') }}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              handleResizeStart(e, getHandle('s') as any);
+                            }}
+                          />
+                        </>
+                      )}
+                    </>
+                  );
+                })()}
               </>
             )}
           </div>
@@ -1088,6 +1248,12 @@ export function Canvas({
     let newX = layer.transform.x;
     let newY = layer.transform.y;
 
+    // Get current scale factors (including flips)
+    const currentScaleX = layer.transform.scaleX ?? 1;
+    const currentScaleY = layer.transform.scaleY ?? 1;
+    const isFlippedX = currentScaleX < 0;
+    const isFlippedY = currentScaleY < 0;
+
     // Always maintain aspect ratio for image and sticker layers
     const shouldMaintainAspectRatio =
       layer.type === 'image' ||
@@ -1095,15 +1261,21 @@ export function Canvas({
       (e instanceof MouseEvent && e.shiftKey);
     const aspectRatio = resizeStart.width / resizeStart.height;
 
-    // Handle different resize directions
+    // Adjust delta based on flipped state
+    const adjustedDeltaX = isFlippedX ? -deltaX : deltaX;
+    const adjustedDeltaY = isFlippedY ? -deltaY : deltaY;
+
+    // Handle different resize directions, accounting for flipped states
     if (resizeHandle.includes('e')) {
-      newWidth = Math.max(50, resizeStart.width + deltaX);
+      const delta = isFlippedX ? -adjustedDeltaX : adjustedDeltaX;
+      newWidth = Math.max(50, resizeStart.width + delta);
       if (shouldMaintainAspectRatio) {
         newHeight = newWidth / aspectRatio;
       }
     }
     if (resizeHandle.includes('w')) {
-      const width = Math.max(50, resizeStart.width - deltaX);
+      const delta = isFlippedX ? -adjustedDeltaX : adjustedDeltaX;
+      const width = Math.max(50, resizeStart.width - delta);
       newX = layer.transform.x + (resizeStart.width - width);
       newWidth = width;
       if (shouldMaintainAspectRatio) {
@@ -1114,13 +1286,15 @@ export function Canvas({
       }
     }
     if (resizeHandle.includes('s')) {
-      newHeight = Math.max(50, resizeStart.height + deltaY);
+      const delta = isFlippedY ? -adjustedDeltaY : adjustedDeltaY;
+      newHeight = Math.max(50, resizeStart.height + delta);
       if (shouldMaintainAspectRatio) {
         newWidth = newHeight * aspectRatio;
       }
     }
     if (resizeHandle.includes('n')) {
-      const height = Math.max(50, resizeStart.height - deltaY);
+      const delta = isFlippedY ? -adjustedDeltaY : adjustedDeltaY;
+      const height = Math.max(50, resizeStart.height - delta);
       newY = layer.transform.y + (resizeStart.height - height);
       newHeight = height;
       if (shouldMaintainAspectRatio) {
@@ -1135,7 +1309,9 @@ export function Canvas({
     if (resizeHandle.length === 2) {
       if (shouldMaintainAspectRatio) {
         // Use the larger delta to determine the scaling
-        if (Math.abs(deltaX) > Math.abs(deltaY)) {
+        const absDeltaX = Math.abs(adjustedDeltaX);
+        const absDeltaY = Math.abs(adjustedDeltaY);
+        if (absDeltaX > absDeltaY) {
           newHeight = newWidth / aspectRatio;
         } else {
           newWidth = newHeight * aspectRatio;
