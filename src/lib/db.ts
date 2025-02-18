@@ -116,11 +116,10 @@ const TABLES = {
       project_id TEXT NOT NULL,
       type TEXT NOT NULL,
       layer_id TEXT NOT NULL,
-      before TEXT NOT NULL, -- JSON object
-      after TEXT NOT NULL, -- JSON object
+      before TEXT,
+      after TEXT NOT NULL,
       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-      FOREIGN KEY (layer_id) REFERENCES layers(id) ON DELETE CASCADE
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     )
   `,
   canvas_settings: `
@@ -155,8 +154,48 @@ export async function initTables(db: Database) {
       console.log(`Table ${tableName} created successfully`);
     }
     console.log('All tables initialized successfully');
+
+    // Initialize triggers
+    console.log('Initializing triggers...');
+    await initTriggers(db);
+    console.log('Triggers initialized successfully');
   } catch (error) {
-    console.error('Error during table initialization:', error);
+    console.error('Error during initialization:', error);
+    throw error;
+  }
+}
+
+// Add function to initialize triggers
+async function initTriggers(db: Database) {
+  try {
+    // Drop existing triggers first
+    await db.execute('DROP TRIGGER IF EXISTS check_layer_exists');
+    await db.execute('DROP TRIGGER IF EXISTS check_layer_delete');
+
+    // Create trigger to check layer existence on action insert
+    await db.execute(`
+      CREATE TRIGGER IF NOT EXISTS check_layer_exists
+      AFTER INSERT ON actions
+      BEGIN
+        SELECT CASE 
+          WHEN NEW.type != 'add_layer' AND NOT EXISTS (
+            SELECT 1 FROM layers WHERE id = NEW.layer_id
+          )
+        THEN RAISE(FAIL, 'Layer does not exist')
+        END;
+      END;
+    `);
+
+    // Create trigger to check layer deletion
+    await db.execute(`
+      CREATE TRIGGER IF NOT EXISTS check_layer_delete
+      BEFORE DELETE ON layers
+      BEGIN
+        DELETE FROM actions WHERE layer_id = OLD.id;
+      END;
+    `);
+  } catch (error) {
+    console.error('Failed to initialize triggers:', error);
     throw error;
   }
 }
@@ -426,7 +465,7 @@ export async function getImageAsset(id: string): Promise<Uint8Array> {
 }
 
 // Layer operations
-export async function createLayer(
+export async function createLayerWithAction(
   projectId: string,
   layer: LayerCreate
 ): Promise<string> {
@@ -440,84 +479,121 @@ export async function createLayer(
   );
   const nextIndex = (maxIndex[0]?.max_index ?? -1) + 1;
 
-  if (layer.type === 'text') {
-    const style = {
-      fontFamily: layer.style?.fontFamily ?? 'Inter',
-      fontSize: layer.style?.fontSize ?? 24,
-      fontWeight: layer.style?.fontWeight ?? 400,
-      color: layer.style?.color ?? '#FFFFFF',
-      textAlign: layer.style?.textAlign ?? 'left',
-      italic: layer.style?.italic ?? false,
-      underline: layer.style?.underline ?? false,
-      verticalAlign: layer.style?.verticalAlign ?? 'center',
-      wordWrap: layer.style?.wordWrap ?? 'normal',
+  await withTransaction(db, async () => {
+    // First create the layer
+    if (layer.type === 'text') {
+      const style = {
+        fontFamily: layer.style?.fontFamily ?? 'Inter',
+        fontSize: layer.style?.fontSize ?? 24,
+        fontWeight: layer.style?.fontWeight ?? 400,
+        color: layer.style?.color ?? '#FFFFFF',
+        textAlign: layer.style?.textAlign ?? 'left',
+        italic: layer.style?.italic ?? false,
+        underline: layer.style?.underline ?? false,
+        verticalAlign: layer.style?.verticalAlign ?? 'center',
+        wordWrap: layer.style?.wordWrap ?? 'normal',
+      };
+
+      await db.execute(
+        `INSERT INTO layers (
+          id, 
+          project_id, 
+          type, 
+          content, 
+          style, 
+          transform,
+          vertical_align,
+          word_wrap
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          layerId,
+          projectId,
+          layer.type,
+          layer.content ?? '',
+          JSON.stringify(style),
+          JSON.stringify(layer.transform),
+          style.verticalAlign,
+          style.wordWrap,
+        ]
+      );
+    } else if (layer.type === 'image') {
+      await db.execute(
+        `INSERT INTO layers (
+          id, 
+          project_id, 
+          type, 
+          transform, 
+          image_asset_id
+        ) VALUES ($1, $2, $3, $4, $5)`,
+        [
+          layerId,
+          projectId,
+          layer.type,
+          JSON.stringify(layer.transform),
+          layer.imageAssetId,
+        ]
+      );
+    } else if (layer.type === 'sticker') {
+      await db.execute(
+        `INSERT INTO layers (
+          id, 
+          project_id, 
+          type, 
+          transform, 
+          sticker_asset_id
+        ) VALUES ($1, $2, $3, $4, $5)`,
+        [
+          layerId,
+          projectId,
+          layer.type,
+          JSON.stringify(layer.transform),
+          layer.stickerAssetId,
+        ]
+      );
+    }
+
+    // Add layer to layer_order
+    await db.execute(
+      'INSERT INTO layer_order (project_id, layer_id, index_number) VALUES ($1, $2, $3)',
+      [projectId, layerId, nextIndex]
+    );
+
+    // Create the action
+    const actionId = nanoid();
+    const layerWithIndex = {
+      ...layer,
+      index: nextIndex,
     };
 
     await db.execute(
-      `INSERT INTO layers (
-        id, 
-        project_id, 
-        type, 
-        content, 
-        style, 
-        transform,
-        vertical_align,
-        word_wrap
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      `INSERT INTO actions (
+        id, project_id, type, layer_id, before, after
+      ) VALUES ($1, $2, $3, $4, $5, $6)`,
       [
-        layerId,
+        actionId,
         projectId,
-        layer.type,
-        layer.content ?? '',
-        JSON.stringify(style),
-        JSON.stringify(layer.transform),
-        style.verticalAlign,
-        style.wordWrap,
+        'add_layer',
+        layerId,
+        null,
+        JSON.stringify(layerWithIndex),
       ]
     );
-  } else if (layer.type === 'image') {
-    await db.execute(
-      `INSERT INTO layers (
-        id, 
-        project_id, 
-        type, 
-        transform, 
-        image_asset_id
-      ) VALUES ($1, $2, $3, $4, $5)`,
-      [
-        layerId,
-        projectId,
-        layer.type,
-        JSON.stringify(layer.transform),
-        layer.imageAssetId,
-      ]
-    );
-  } else if (layer.type === 'sticker') {
-    await db.execute(
-      `INSERT INTO layers (
-        id, 
-        project_id, 
-        type, 
-        transform, 
-        sticker_asset_id
-      ) VALUES ($1, $2, $3, $4, $5)`,
-      [
-        layerId,
-        projectId,
-        layer.type,
-        JSON.stringify(layer.transform),
-        layer.stickerAssetId,
-      ]
-    );
-  }
 
-  // Add layer to layer_order with the next available index
-  await db.execute(
-    'INSERT INTO layer_order (project_id, layer_id, index_number) VALUES ($1, $2, $3)',
-    [projectId, layerId, nextIndex]
-  );
+    // Update the project's current action index
+    await db.execute(
+      'UPDATE projects SET current_action_index = (SELECT COUNT(*) - 1 FROM actions WHERE project_id = $1) WHERE id = $1',
+      [projectId]
+    );
+  });
 
   return layerId;
+}
+
+export async function createLayer(
+  projectId: string,
+  layer: LayerCreate
+): Promise<string> {
+  return createLayerWithAction(projectId, layer);
 }
 
 // Add transaction helper function
@@ -602,19 +678,23 @@ export async function createAction(
   const db = await getDatabase();
   const id = nanoid();
 
-  await db.execute(
-    `INSERT INTO actions (
-      id, project_id, type, layer_id, before, after
-    ) VALUES ($1, $2, $3, $4, $5, $6)`,
-    [
-      id,
-      action.projectId,
-      action.type,
-      action.layerId,
-      JSON.stringify(action.before),
-      JSON.stringify(action.after),
-    ]
-  );
+  // For add_layer actions, before should be null
+  const beforeJson = action.type === 'add_layer' 
+    ? null 
+    : action.before !== null 
+      ? JSON.stringify(action.before) 
+      : JSON.stringify({}); // Empty object as fallback for other actions
+
+  const afterJson = action.after !== null ? JSON.stringify(action.after) : JSON.stringify({});
+
+  await withTransaction(db, async () => {
+    await db.execute(
+      `INSERT INTO actions (
+        id, project_id, type, layer_id, before, after
+      ) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [id, action.projectId, action.type, action.layerId, beforeJson, afterJson]
+    );
+  });
 
   return id;
 }
@@ -627,8 +707,8 @@ export async function getProjectActions(projectId: string): Promise<Action[]> {
       project_id: string;
       type: string;
       layer_id: string;
-      before: string;
-      after: string;
+      before: string | null;
+      after: string | null;
       timestamp: string;
     }>
   >('SELECT * FROM actions WHERE project_id = $1 ORDER BY timestamp ASC', [
@@ -640,8 +720,8 @@ export async function getProjectActions(projectId: string): Promise<Action[]> {
     projectId: row.project_id,
     type: row.type as ActionType,
     layerId: row.layer_id,
-    before: JSON.parse(row.before),
-    after: JSON.parse(row.after),
+    before: row.before ? JSON.parse(row.before) : null,
+    after: row.after ? JSON.parse(row.after) : null,
     timestamp: new Date(row.timestamp),
   }));
 }
@@ -1168,4 +1248,168 @@ export async function getDatabase() {
     }
   }
   return db;
+}
+
+// Add these new functions after the existing action operations
+
+export async function updateProjectActionIndex(
+  projectId: string,
+  newIndex: number
+): Promise<void> {
+  const db = await getDatabase();
+  await db.execute(
+    'UPDATE projects SET current_action_index = $1 WHERE id = $2',
+    [newIndex, projectId]
+  );
+}
+
+export async function clearActionsAfterIndex(
+  projectId: string,
+  index: number
+): Promise<void> {
+  const db = await getDatabase();
+  await db.execute(
+    'DELETE FROM actions WHERE project_id = $1 AND rowid > (SELECT rowid FROM actions WHERE project_id = $1 ORDER BY timestamp ASC LIMIT 1 OFFSET $2)',
+    [projectId, index]
+  );
+}
+
+export async function getActionCount(projectId: string): Promise<number> {
+  const db = await getDatabase();
+  const result = await db.select<Array<{ count: number }>>(
+    'SELECT COUNT(*) as count FROM actions WHERE project_id = $1',
+    [projectId]
+  );
+  return result[0].count;
+}
+
+// Function to apply an action (either undo or redo)
+export async function applyAction(
+  projectId: string,
+  action: Action,
+  isUndo: boolean
+): Promise<void> {
+  const db = await getDatabase();
+  const state = isUndo ? action.before : action.after;
+
+  await withTransaction(db, async () => {
+    // Special handling for add_layer actions
+    if (action.type === 'add_layer' && isUndo) {
+      // First delete any existing layer with this ID (in case of redo after undo)
+      await db.execute('DELETE FROM layers WHERE id = $1', [action.layerId]);
+      await db.execute(
+        'DELETE FROM layer_order WHERE layer_id = $1',
+        [action.layerId]
+      );
+      return;
+    }
+
+    if (state === null && !isUndo) {
+      // Handle case where we're redoing a delete
+      await db.execute('DELETE FROM layers WHERE id = $1', [action.layerId]);
+      await db.execute(
+        'DELETE FROM layer_order WHERE layer_id = $1',
+        [action.layerId]
+      );
+      return;
+    }
+
+    if (state === null && isUndo && action.type !== 'add_layer') {
+      // This shouldn't happen - we can't undo to a null state except for add_layer
+      throw new Error('Invalid undo state');
+    }
+
+    switch (action.type) {
+      case 'add_layer':
+      case 'remove_layer': {
+        const layerState = state as Layer & { index: number };
+        if (action.type === 'add_layer' ? isUndo : !isUndo) {
+          // First delete any existing layer with this ID (in case of redo after undo)
+          await db.execute('DELETE FROM layers WHERE id = $1', [action.layerId]);
+          await db.execute(
+            'DELETE FROM layer_order WHERE layer_id = $1',
+            [action.layerId]
+          );
+        } else {
+          // First delete any existing layer with this ID (in case of redo after undo)
+          await db.execute('DELETE FROM layers WHERE id = $1', [action.layerId]);
+          await db.execute(
+            'DELETE FROM layer_order WHERE layer_id = $1',
+            [action.layerId]
+          );
+
+          // Handle different layer types
+          let insertValues: any[] = [
+            layerState.id,
+            projectId,
+            layerState.type,
+            null, // content
+            JSON.stringify(layerState.transform),
+            null, // style
+            null, // image_asset_id
+            null, // sticker_asset_id
+          ];
+
+          if (layerState.type === 'text') {
+            insertValues[3] = layerState.content;
+            insertValues[5] = JSON.stringify(layerState.style);
+          } else if (layerState.type === 'image') {
+            insertValues[6] = layerState.imageAssetId;
+          } else if (layerState.type === 'sticker') {
+            insertValues[7] = layerState.stickerAssetId;
+          }
+
+          await db.execute(
+            `INSERT INTO layers (
+              id, project_id, type, content, transform, style, 
+              image_asset_id, sticker_asset_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            insertValues
+          );
+
+          await db.execute(
+            'INSERT INTO layer_order (project_id, layer_id, index_number) VALUES ($1, $2, $3)',
+            [projectId, layerState.id, layerState.index]
+          );
+        }
+        break;
+      }
+
+      case 'update_transform':
+      case 'update_style':
+      case 'update_content': {
+        const layerState = state as Layer;
+        let updateValues: any[] = [
+          JSON.stringify(layerState.transform),
+          null, // style
+          null, // content
+          action.layerId,
+        ];
+
+        if (layerState.type === 'text') {
+          updateValues[1] = JSON.stringify(layerState.style);
+          updateValues[2] = layerState.content;
+        }
+
+        await db.execute(
+          'UPDATE layers SET transform = $1, style = $2, content = $3 WHERE id = $4',
+          updateValues
+        );
+        break;
+      }
+
+      case 'reorder_layers': {
+        const layers = state as Array<{ id: string; index: number }>;
+        await Promise.all(
+          layers.map((layer) =>
+            db.execute(
+              'UPDATE layer_order SET index_number = $1 WHERE project_id = $2 AND layer_id = $3',
+              [layer.index, projectId, layer.id]
+            )
+          )
+        );
+        break;
+      }
+    }
+  });
 }

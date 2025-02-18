@@ -18,7 +18,7 @@ interface CanvasProps {
   layers: Array<{ id: string; index: number }>;
   selectedLayerId: string | null;
   onLayerSelect: (id: string | null) => void;
-  onLayerUpdate: (layer: Layer) => Promise<void>;
+  onLayerUpdate: (layer: Layer, originalLayer?: Layer) => Promise<void>;
   onLayerReorder: (layerId: string, newIndex: number) => void;
   onLayerDelete: (layerId: string) => void;
   onLayerDuplicate: (layerId: string) => void;
@@ -584,8 +584,25 @@ export function Canvas({
       // Get the final position and update the database
       const layer = layerData.find((l) => l.id === dragLayer.id);
       if (layer) {
-        // Just update directly, let the DatabaseQueue handle serialization
-        void onLayerUpdate(layer);
+        // Store the original state before the drag
+        const originalLayer = { ...dragLayer }; // Create a deep copy of the original state
+
+        // Create updated layer with new position
+        const updatedLayer = {
+          ...layer,
+          transform: {
+            ...layer.transform,
+          },
+        };
+
+        // Only update if the position actually changed
+        if (
+          originalLayer.transform.x !== updatedLayer.transform.x ||
+          originalLayer.transform.y !== updatedLayer.transform.y
+        ) {
+          // Just update directly, let the DatabaseQueue handle serialization
+          void onLayerUpdate(updatedLayer, originalLayer);
+        }
       }
 
       setIsDragging(false);
@@ -600,7 +617,7 @@ export function Canvas({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isDragging, dragLayer, dragStart, zoom, layerData, onLayerUpdate]);
+  }, [isDragging, dragLayer, dragStart, zoom, layerData]);
 
   // Handle keyboard controls for selected layer
   useEffect(() => {
@@ -1833,17 +1850,19 @@ export function Canvas({
     const adjustedDeltaX = isFlippedX ? -deltaX : deltaX;
     const adjustedDeltaY = isFlippedY ? -deltaY : deltaY;
 
+    // Calculate minimum size
+    const MIN_SIZE = 20;
+
     // Handle different resize directions, accounting for flipped states
     if (resizeHandle.includes('e')) {
       const delta = isFlippedX ? -adjustedDeltaX : adjustedDeltaX;
-      newWidth = Math.max(50, resizeStart.width + delta);
+      newWidth = Math.max(MIN_SIZE, resizeStart.width + delta);
       if (shouldMaintainAspectRatio) {
         newHeight = newWidth / aspectRatio;
       }
-    }
-    if (resizeHandle.includes('w')) {
+    } else if (resizeHandle.includes('w')) {
       const delta = isFlippedX ? -adjustedDeltaX : adjustedDeltaX;
-      const width = Math.max(50, resizeStart.width - delta);
+      const width = Math.max(MIN_SIZE, resizeStart.width - delta);
       if (shouldMaintainAspectRatio) {
         const heightDiff = width / aspectRatio - resizeStart.height;
         newWidth = width;
@@ -1855,16 +1874,16 @@ export function Canvas({
         newX = layer.transform.x + (resizeStart.width - width);
       }
     }
+
     if (resizeHandle.includes('s')) {
       const delta = isFlippedY ? -adjustedDeltaY : adjustedDeltaY;
-      newHeight = Math.max(50, resizeStart.height + delta);
+      newHeight = Math.max(MIN_SIZE, resizeStart.height + delta);
       if (shouldMaintainAspectRatio) {
         newWidth = newHeight * aspectRatio;
       }
-    }
-    if (resizeHandle.includes('n')) {
+    } else if (resizeHandle.includes('n')) {
       const delta = isFlippedY ? -adjustedDeltaY : adjustedDeltaY;
-      const height = Math.max(50, resizeStart.height - delta);
+      const height = Math.max(MIN_SIZE, resizeStart.height - delta);
       if (shouldMaintainAspectRatio) {
         const widthDiff = height * aspectRatio - resizeStart.width;
         newHeight = height;
@@ -1940,6 +1959,12 @@ export function Canvas({
         heightGuide?.guide,
       ].filter((guide): guide is AlignmentGuide => guide !== undefined)
     );
+
+    // Ensure the layer stays within reasonable bounds
+    const maxWidth = canvasSize.width * 5;
+    const maxHeight = canvasSize.height * 5;
+    newWidth = Math.min(maxWidth, Math.max(MIN_SIZE, newWidth));
+    newHeight = Math.min(maxHeight, Math.max(MIN_SIZE, newHeight));
 
     // Update layer with new dimensions
     setLayerData((prev) =>

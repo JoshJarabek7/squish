@@ -17,6 +17,11 @@ import {
   getCanvasSettings,
   getImageAssetData,
   withTransaction,
+  createAction,
+  getProjectActions,
+  updateProjectActionIndex,
+  clearActionsAfterIndex,
+  applyAction,
 } from '@/lib/db';
 import { nanoid } from 'nanoid';
 import { SettingsDialog } from '@/components/settings-dialog';
@@ -81,6 +86,7 @@ import {
 
 import { HeaderToolbar } from '@/components/header-toolbar';
 import { LayerPanel, LayerPanelTrigger } from '@/components/layer-panel';
+import { Action, ActionType } from '@/types/ProjectType';
 
 // Create a custom hook for project loading
 function useProjects() {
@@ -143,6 +149,7 @@ export default function Playground() {
     rows: 3,
     showFractions: true,
   });
+  const [actions, setActions] = useState<Action[]>([]);
 
   // Add a ref to track if we're currently deleting a project
   const isDeletingProject = useRef(false);
@@ -464,8 +471,8 @@ export default function Playground() {
               img.src = imageUrl;
             });
 
-            // Create the layer with the asset
-            const layerId = await createLayer(currentProject.id, {
+            // Create the layer
+            const newLayer = {
               id: nanoid(),
               type: 'image' as const,
               imageAssetId: assetId,
@@ -480,7 +487,16 @@ export default function Playground() {
                 opacity: 1,
                 blendMode: 'normal',
               },
+            };
+
+            // Record the action before creating the layer
+            await recordAction('add_layer', newLayer.id, null, {
+              ...newLayer,
+              index: currentProject.layers.length,
             });
+
+            // Create the layer in the database
+            const layerId = await createLayer(currentProject.id, newLayer);
 
             // Get the updated layer data
             const [layers, fullProject] = await Promise.all([
@@ -545,24 +561,31 @@ export default function Playground() {
         },
       };
 
-      const layerId = await createLayer(currentProject.id, newLayer);
-
-      // Update current project with new layer
+      // Get the next index for the new layer
       const newLayerIndex = currentProject.layers.length;
-      setCurrentProject({
-        ...currentProject,
-        layers: [
-          ...currentProject.layers,
-          { id: layerId, index: newLayerIndex },
-        ],
+
+      // Record the action before creating the layer
+      await recordAction('add_layer', newLayer.id, null, {
+        ...newLayer,
+        index: newLayerIndex,
       });
 
-      // Update layerData state
-      setLayerData((prev) => [
-        ...prev,
-        { ...newLayer, id: layerId, createdAt: new Date() },
-      ]);
+      const layerId = await createLayer(currentProject.id, newLayer);
+
+      // Get the updated project and layer data
+      const [updatedProject, updatedLayers, updatedActions] = await Promise.all(
+        [
+          getProjectWithLayers(currentProject.id),
+          getProjectLayers(currentProject.id),
+          getProjectActions(currentProject.id),
+        ]
+      );
+
+      // Update all state at once
+      setCurrentProject(updatedProject);
+      setLayerData(updatedLayers);
       setSelectedLayerId(layerId);
+      setActions(updatedActions);
 
       // Update the project's last modified timestamp
       await updateProjectTimestamp(currentProject.id);
@@ -572,22 +595,70 @@ export default function Playground() {
     }
   };
 
-  const handleLayerUpdate = async (updatedLayer: Layer) => {
+  const handleLayerUpdate = async (
+    updatedLayer: Layer,
+    originalLayer?: Layer
+  ) => {
     if (!currentProject) return;
 
     try {
-      // Update the layer in the database
+      // Get the layer's current state before updating if not provided
+      const currentLayer =
+        originalLayer || layerData.find((l) => l.id === updatedLayer.id);
+      if (!currentLayer) return;
+
+      // Only record the action if it's a significant change
+      const hasTransformChange =
+        JSON.stringify(currentLayer.transform) !==
+        JSON.stringify(updatedLayer.transform);
+      const hasStyleChange =
+        currentLayer.type === 'text' &&
+        updatedLayer.type === 'text' &&
+        JSON.stringify(currentLayer.style) !==
+          JSON.stringify(updatedLayer.style);
+      const hasContentChange =
+        currentLayer.type === 'text' &&
+        updatedLayer.type === 'text' &&
+        currentLayer.content !== updatedLayer.content;
+
+      // Check for flip changes
+      const isFlipChange =
+        hasTransformChange &&
+        (currentLayer.transform.scaleX !== updatedLayer.transform.scaleX ||
+          currentLayer.transform.scaleY !== updatedLayer.transform.scaleY);
+
+      // Update the layer in the database first
       await updateLayer(updatedLayer.id, updatedLayer);
 
+      // Record the action only if there's a significant change
+      if (hasTransformChange || hasStyleChange || hasContentChange) {
+        const actionType = isFlipChange
+          ? 'update_transform'
+          : hasTransformChange
+            ? 'update_transform'
+            : hasStyleChange
+              ? 'update_style'
+              : 'update_content';
+
+        await recordAction(
+          actionType,
+          updatedLayer.id,
+          currentLayer,
+          updatedLayer
+        );
+      }
+
       // Get the updated layer data from the database to ensure consistency
-      const [layers, fullProject] = await Promise.all([
+      const [layers, fullProject, updatedActions] = await Promise.all([
         getProjectLayers(currentProject.id),
         getProjectWithLayers(currentProject.id),
+        getProjectActions(currentProject.id),
       ]);
 
       // Update all states in a single batch
       setCurrentProject(fullProject);
       setLayerData(layers);
+      setActions(updatedActions);
 
       // Update the project's last modified timestamp
       await updateProjectTimestamp(currentProject.id);
@@ -657,6 +728,14 @@ export default function Playground() {
     while (attempt < maxRetries) {
       const db = await getDatabase();
       try {
+        // Record the action before making the change
+        await recordAction(
+          'reorder_layers',
+          layerId,
+          currentProject.layers,
+          updatedLayers
+        );
+
         // Use withTransaction helper for proper transaction management
         await withTransaction(db, async () => {
           // Update all layer indices in the database
@@ -713,6 +792,22 @@ export default function Playground() {
     const db = await getDatabase();
 
     try {
+      // Get the layer's current state before deleting
+      const layer = layerData.find((l) => l.id === layerId);
+      if (!layer) return;
+
+      const layerIndex = currentProject.layers.find(
+        (l) => l.id === layerId
+      )?.index;
+
+      // Record the action
+      await recordAction(
+        'remove_layer',
+        layerId,
+        { ...layer, index: layerIndex },
+        null
+      );
+
       await withTransaction(db, async () => {
         // Delete layer from the database
         await db.execute('DELETE FROM layers WHERE id = $1', [layerId]);
@@ -742,7 +837,6 @@ export default function Playground() {
         getProjectWithLayers(currentProject.id),
       ]);
 
-      // Update both currentProject and layerData states
       setCurrentProject(updatedProject);
       setLayerData(updatedLayers);
 
@@ -1059,6 +1153,204 @@ export default function Playground() {
     }
   };
 
+  // Add this function to create and record an action
+  const recordAction = async (
+    type: ActionType,
+    layerId: string,
+    before: unknown,
+    after: unknown
+  ) => {
+    if (!currentProject) return;
+
+    try {
+      console.log('Recording action:', {
+        type,
+        layerId,
+        currentIndex: currentProject.currentActionIndex,
+        actionsLength: actions.length,
+      });
+
+      // Clear any actions after the current index
+      if (currentProject.currentActionIndex < actions.length - 1) {
+        await clearActionsAfterIndex(
+          currentProject.id,
+          currentProject.currentActionIndex
+        );
+      }
+
+      // Create the action
+      await createAction({
+        projectId: currentProject.id,
+        type,
+        layerId,
+        before,
+        after,
+      });
+
+      // Update the project's action index
+      const newIndex = currentProject.currentActionIndex + 1;
+      await updateProjectActionIndex(currentProject.id, newIndex);
+
+      // Get updated actions
+      const updatedActions = await getProjectActions(currentProject.id);
+
+      console.log('After recording action:', {
+        newIndex,
+        actionsLength: updatedActions.length,
+        actions: updatedActions,
+      });
+
+      // Update local state
+      const updatedProject = {
+        ...currentProject,
+        currentActionIndex: newIndex,
+      };
+      setCurrentProject(updatedProject);
+      setActions(updatedActions);
+    } catch (error) {
+      console.error('Failed to record action:', error);
+      toast.error('Failed to record action');
+    }
+  };
+
+  // Add undo/redo handlers
+  const handleUndo = async () => {
+    if (!currentProject || currentProject.currentActionIndex < 0) return;
+
+    try {
+      console.log('Starting undo with:', {
+        currentIndex: currentProject.currentActionIndex,
+        actionsLength: actions.length,
+        action: actions[currentProject.currentActionIndex],
+        allActions: actions,
+      });
+
+      // Validate action index
+      if (currentProject.currentActionIndex >= actions.length) {
+        console.error('Invalid action index:', {
+          currentIndex: currentProject.currentActionIndex,
+          actionsLength: actions.length,
+        });
+        return;
+      }
+
+      const action = actions[currentProject.currentActionIndex];
+      if (!action) {
+        console.error(
+          'No action found at index:',
+          currentProject.currentActionIndex
+        );
+        return;
+      }
+
+      await applyAction(currentProject.id, action, true);
+
+      // Update the project's action index
+      const newIndex = currentProject.currentActionIndex - 1;
+      await updateProjectActionIndex(currentProject.id, newIndex);
+
+      // Update local state
+      const [layers, fullProject] = await Promise.all([
+        getProjectLayers(currentProject.id),
+        getProjectWithLayers(currentProject.id),
+      ]);
+
+      console.log('After undo:', {
+        newIndex,
+        actionsLength: actions.length,
+        fullProjectIndex: fullProject.currentActionIndex,
+        allActions: actions,
+      });
+
+      // Make sure we update the project with the correct action index
+      const updatedProject = {
+        ...fullProject,
+        currentActionIndex: newIndex,
+      };
+
+      setCurrentProject(updatedProject);
+      setLayerData(layers);
+      // Keep the existing actions array instead of fetching new ones
+
+      // Update the project's last modified timestamp
+      await updateProjectTimestamp(currentProject.id);
+    } catch (error) {
+      console.error('Failed to undo:', error);
+      toast.error('Failed to undo');
+    }
+  };
+
+  const handleRedo = async () => {
+    if (!currentProject) return;
+
+    try {
+      console.log('Starting redo with:', {
+        currentIndex: currentProject.currentActionIndex,
+        actionsLength: actions.length,
+        nextAction: actions[currentProject.currentActionIndex + 1],
+        allActions: actions,
+      });
+
+      if (currentProject.currentActionIndex >= actions.length - 1) {
+        console.log('No actions to redo');
+        return;
+      }
+
+      const action = actions[currentProject.currentActionIndex + 1];
+      await applyAction(currentProject.id, action, false);
+
+      // Update the project's action index
+      const newIndex = currentProject.currentActionIndex + 1;
+      await updateProjectActionIndex(currentProject.id, newIndex);
+
+      // Update local state
+      const [layers, fullProject] = await Promise.all([
+        getProjectLayers(currentProject.id),
+        getProjectWithLayers(currentProject.id),
+      ]);
+
+      console.log('After redo:', {
+        newIndex,
+        actionsLength: actions.length,
+        fullProjectIndex: fullProject.currentActionIndex,
+        allActions: actions,
+      });
+
+      // Make sure we update the project with the correct action index
+      const updatedProject = {
+        ...fullProject,
+        currentActionIndex: newIndex,
+      };
+
+      setCurrentProject(updatedProject);
+      setLayerData(layers);
+      // Keep the existing actions array instead of fetching new ones
+
+      // Update the project's last modified timestamp
+      await updateProjectTimestamp(currentProject.id);
+    } catch (error) {
+      console.error('Failed to redo:', error);
+      toast.error('Failed to redo');
+    }
+  };
+
+  // Load actions when project changes
+  useEffect(() => {
+    if (!currentProject?.id) return;
+
+    const loadActions = async () => {
+      try {
+        const projectActions = await getProjectActions(currentProject.id);
+        setActions(projectActions);
+      } catch (error) {
+        console.error('Failed to load actions:', error);
+        toast.error('Failed to load actions');
+      }
+    };
+
+    loadActions();
+  }, [currentProject?.id]);
+
   return (
     <main className='w-screen h-screen bg-background text-foreground flex'>
       <SidebarProvider>
@@ -1220,11 +1512,18 @@ export default function Playground() {
                       onAddImage={handleAddImage}
                       onAddText={handleAddText}
                       onSave={() => {}}
-                      onUndo={() => {}}
-                      onRedo={() => {}}
+                      onUndo={handleUndo}
+                      onRedo={handleRedo}
                       onExport={handleExport}
-                      canUndo={false}
-                      canRedo={false}
+                      canUndo={
+                        actions.length > 0 &&
+                        currentProject?.currentActionIndex >= 0
+                      }
+                      canRedo={
+                        actions.length > 0 &&
+                        currentProject !== undefined &&
+                        currentProject.currentActionIndex < actions.length - 1
+                      }
                       sidebarTrigger={<SidebarTrigger />}
                       onBackgroundColorChange={handleBackgroundColorChange}
                       onBackgroundImageChange={handleBackgroundImageChange}
