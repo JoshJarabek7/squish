@@ -23,6 +23,13 @@ import { SettingsDialog } from '@/components/settings-dialog';
 import { Canvas } from '@/components/canvas';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import {
+  compareLayersForRender,
+  exportCanvasAsImage,
+  type ExportLayer,
+} from '@/lib/utils';
+import { save } from '@tauri-apps/plugin-dialog';
+import { writeFile } from '@tauri-apps/plugin-fs';
 
 import {
   Sidebar,
@@ -920,6 +927,86 @@ export default function Playground() {
     // No need to increment canvas version as it's not related to centering
   };
 
+  const handleExport = async () => {
+    if (!currentProject) return;
+
+    try {
+      // Get canvas settings
+      const settings = await getCanvasSettings(currentProject.id);
+
+      // Prepare layers data for export
+      const exportLayers: ExportLayer[] = layerData
+        .sort((a, b) => compareLayersForRender(a, b, currentProject.layers))
+        .map((layer) => {
+          const baseLayer = {
+            type: layer.type,
+            transform: layer.transform,
+          };
+
+          if (layer.type === 'text') {
+            return {
+              ...baseLayer,
+              content: layer.content,
+              style: layer.style,
+            };
+          } else if (layer.type === 'image' || layer.type === 'sticker') {
+            const assetId =
+              layer.type === 'image'
+                ? layer.imageAssetId
+                : layer.stickerAssetId;
+            const asset = assetData[assetId];
+            return {
+              ...baseLayer,
+              imageUrl: asset?.url,
+            };
+          }
+
+          return baseLayer;
+        });
+
+      // Prepare background data
+      const background = {
+        type: canvasBackground.type,
+        color: canvasBackground.color,
+        imageUrl: canvasBackground.imageUrl,
+      };
+
+      // Export canvas as image
+      const blob = await exportCanvasAsImage(
+        exportLayers,
+        settings.width,
+        settings.height,
+        background
+      );
+
+      // Convert blob to Uint8Array for Tauri
+      const arrayBuffer = await blob.arrayBuffer();
+      const binaryData = new Uint8Array(arrayBuffer);
+
+      // Open save dialog
+      const filePath = await save({
+        filters: [
+          {
+            name: 'Image',
+            extensions: ['png'],
+          },
+        ],
+        defaultPath: `${currentProject.name}.png`,
+      });
+
+      if (filePath) {
+        // Save the file
+        await writeFile(filePath, binaryData);
+        const filename =
+          filePath.split('/').pop() || filePath.split('\\').pop();
+        toast.success(`Image saved as "${filename}"`);
+      }
+    } catch (error) {
+      console.error('Failed to export image:', error);
+      toast.error('Failed to export image');
+    }
+  };
+
   return (
     <main className='w-screen h-screen bg-background text-foreground flex'>
       <SidebarProvider>
@@ -1083,7 +1170,7 @@ export default function Playground() {
                       onSave={() => {}}
                       onUndo={() => {}}
                       onRedo={() => {}}
-                      onExport={() => {}}
+                      onExport={handleExport}
                       canUndo={false}
                       canRedo={false}
                       sidebarTrigger={<SidebarTrigger />}
