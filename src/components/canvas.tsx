@@ -442,7 +442,10 @@ export function Canvas({
   const handleMouseDown = (e: React.MouseEvent, layer: Layer) => {
     if (editingTextId === layer.id) return; // Don't start drag while editing text
     if (layer.id !== selectedLayerId || isResizing || isPanning) return;
+    if (isResizing) return; // Explicitly prevent drag during resize
+
     e.stopPropagation();
+    e.preventDefault();
     console.log('Starting drag for layer:', layer.id);
 
     setIsDragging(true);
@@ -688,7 +691,8 @@ export function Canvas({
       className: cn(
         'absolute select-none layer',
         isDragging && isSelected ? 'cursor-grabbing' : 'cursor-grab',
-        layer.type === 'text' && editingTextId === layer.id && 'cursor-text'
+        layer.type === 'text' && editingTextId === layer.id && 'cursor-text',
+        isResizing && 'pointer-events-none' // Add pointer-events-none when resizing
       ),
       style: {
         transform: `translate(${layer.transform.x}px, ${layer.transform.y}px) 
@@ -700,11 +704,18 @@ export function Canvas({
         mixBlendMode: layer.transform
           .blendMode as React.CSSProperties['mixBlendMode'],
         zIndex: layerIndex * 10,
+        pointerEvents: isResizing
+          ? 'none'
+          : ('auto' as React.CSSProperties['pointerEvents']), // Fix type
       },
       onClick: (e: React.MouseEvent) => handleLayerClick(e, layer.id),
       onMouseDown: (e: React.MouseEvent) => {
         // Prevent drag start if we're resizing
-        if (isResizing) return;
+        if (isResizing) {
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
         handleMouseDown(e, layer);
       },
     };
@@ -1276,13 +1287,15 @@ export function Canvas({
     if (resizeHandle.includes('w')) {
       const delta = isFlippedX ? -adjustedDeltaX : adjustedDeltaX;
       const width = Math.max(50, resizeStart.width - delta);
-      newX = layer.transform.x + (resizeStart.width - width);
-      newWidth = width;
       if (shouldMaintainAspectRatio) {
-        newHeight = newWidth / aspectRatio;
-        // Adjust Y to maintain center point
-        const heightDiff = resizeStart.height - newHeight;
-        newY = layer.transform.y + heightDiff / 2;
+        const heightDiff = width / aspectRatio - resizeStart.height;
+        newWidth = width;
+        newHeight = width / aspectRatio;
+        newX = layer.transform.x + (resizeStart.width - width);
+        newY = layer.transform.y - heightDiff / 2;
+      } else {
+        newWidth = width;
+        newX = layer.transform.x + (resizeStart.width - width);
       }
     }
     if (resizeHandle.includes('s')) {
@@ -1295,26 +1308,46 @@ export function Canvas({
     if (resizeHandle.includes('n')) {
       const delta = isFlippedY ? -adjustedDeltaY : adjustedDeltaY;
       const height = Math.max(50, resizeStart.height - delta);
-      newY = layer.transform.y + (resizeStart.height - height);
-      newHeight = height;
       if (shouldMaintainAspectRatio) {
-        newWidth = newHeight * aspectRatio;
-        // Adjust X to maintain center point
-        const widthDiff = resizeStart.width - newWidth;
-        newX = layer.transform.x + widthDiff / 2;
+        const widthDiff = height * aspectRatio - resizeStart.width;
+        newHeight = height;
+        newWidth = height * aspectRatio;
+        newY = layer.transform.y + (resizeStart.height - height);
+        newX = layer.transform.x - widthDiff / 2;
+      } else {
+        newHeight = height;
+        newY = layer.transform.y + (resizeStart.height - height);
       }
     }
 
     // For corner handles
     if (resizeHandle.length === 2) {
       if (shouldMaintainAspectRatio) {
-        // Use the larger delta to determine the scaling
-        const absDeltaX = Math.abs(adjustedDeltaX);
-        const absDeltaY = Math.abs(adjustedDeltaY);
-        if (absDeltaX > absDeltaY) {
-          newHeight = newWidth / aspectRatio;
-        } else {
-          newWidth = newHeight * aspectRatio;
+        // Calculate the cursor's movement direction and magnitude
+        const dx = resizeHandle.includes('w') ? -deltaX : deltaX;
+        const dy = resizeHandle.includes('n') ? -deltaY : deltaY;
+
+        // Project the movement onto the diagonal of the original shape
+        const diagonalLength = Math.sqrt(
+          resizeStart.width * resizeStart.width +
+            resizeStart.height * resizeStart.height
+        );
+        const movementProjection =
+          (dx * resizeStart.width + dy * resizeStart.height) / diagonalLength;
+
+        // Calculate scale based on the projected movement
+        const scale = 1 + movementProjection / diagonalLength;
+
+        // Apply the scale while maintaining aspect ratio
+        newWidth = Math.max(50, resizeStart.width * scale);
+        newHeight = Math.max(50, (resizeStart.width * scale) / aspectRatio);
+
+        // Adjust position based on which corner is being dragged
+        if (resizeHandle.includes('w')) {
+          newX = layer.transform.x + (resizeStart.width - newWidth);
+        }
+        if (resizeHandle.includes('n')) {
+          newY = layer.transform.y + (resizeStart.height - newHeight);
         }
       }
     }
