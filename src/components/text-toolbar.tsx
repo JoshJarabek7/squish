@@ -116,7 +116,11 @@ export function TextToolbar({ layer, onUpdate, className }: TextToolbarProps) {
   const [isOpen, setIsOpen] = useState(true);
 
   const handleInvalidFont = () => {
-    if (!fonts.includes(layer.style.fontFamily)) {
+    if (
+      !isLoading &&
+      fonts.length > 0 &&
+      !fonts.includes(layer.style.fontFamily)
+    ) {
       onUpdate({
         style: {
           ...layer.style,

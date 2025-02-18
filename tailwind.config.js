@@ -90,5 +90,7 @@ export default {
       },
     },
   },
-  plugins: ['tailwindcss-animate'],
+  plugins: [
+    import('tailwindcss-animate')
+  ],
 };

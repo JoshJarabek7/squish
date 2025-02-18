@@ -51,10 +51,8 @@ interface HeaderToolbarProps {
 export function HeaderToolbar({
   selectedLayer,
   onLayerUpdate,
-  isEditing,
   onAddImage,
   onAddText,
-  onSave,
   onUndo,
   onRedo,
   onExport,
@@ -74,7 +72,8 @@ export function HeaderToolbar({
       ...selectedLayer,
       transform: {
         ...selectedLayer.transform,
-        scale: selectedLayer.transform.scale * -1,
+        scaleX: (selectedLayer.transform.scaleX ?? 1) * -1,
+        scaleY: selectedLayer.transform.scaleY ?? 1,
       },
     });
   };
@@ -85,7 +84,8 @@ export function HeaderToolbar({
       ...selectedLayer,
       transform: {
         ...selectedLayer.transform,
-        rotation: selectedLayer.transform.rotation + 180,
+        scaleX: selectedLayer.transform.scaleX ?? 1,
+        scaleY: (selectedLayer.transform.scaleY ?? 1) * -1,
       },
     });
   };

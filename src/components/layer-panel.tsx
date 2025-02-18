@@ -3,7 +3,6 @@ import { useState } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import {
-  ChevronDown,
   Trash2,
   Copy,
   GripVertical,
@@ -30,7 +29,6 @@ import {
   DragStartEvent,
 } from '@dnd-kit/core';
 import {
-  arrayMove,
   SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
@@ -77,7 +75,6 @@ interface SortableLayerItemProps {
 
 function SortableLayerItem({
   layer,
-  index,
   isSelected,
   onSelect,
   onDelete,
@@ -237,7 +234,6 @@ export function LayerPanel({
     const { active, over } = event;
 
     if (over && active.id !== over.id) {
-      const oldIndex = items.indexOf(active.id as string);
       const newIndex = items.indexOf(over.id as string);
       onLayerReorder(active.id as string, sortedLayers[newIndex].index);
     }

@@ -16,7 +16,6 @@ import {
   updateCanvasSettings,
   getCanvasSettings,
   getImageAssetData,
-  dbQueue,
   withTransaction,
 } from '@/lib/db';
 import { nanoid } from 'nanoid';
@@ -114,7 +113,7 @@ export default function Playground() {
   const [newProjectName, setNewProjectName] = useState('');
   const [currentProject, setCurrentProject] = useState<Project>();
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
-  const [showCanvasResizeHandles, setShowCanvasResizeHandles] = useState(true);
+  const [showCanvasResizeHandles] = useState(true);
   const [layerData, setLayerData] = useState<Layer[]>([]);
   const [canvasBackground, setCanvasBackground] = useState<{
     type: 'color' | 'image' | 'none';
@@ -420,12 +419,22 @@ export default function Playground() {
             const arrayBuffer = e.target.result as ArrayBuffer;
             const data = new Uint8Array(arrayBuffer);
 
-            // Create image asset
+            // Create image asset first
             const assetId = await createImageAsset(file.name, file.type, data);
 
             // Create blob URL for immediate display
             const blob = new Blob([data], { type: file.type });
             const imageUrl = URL.createObjectURL(blob);
+
+            // Update assetData state first to ensure the image can be displayed
+            setAssetData((prev) => ({
+              ...prev,
+              [assetId]: {
+                url: imageUrl,
+                loading: false,
+                error: false,
+              },
+            }));
 
             // Get image dimensions
             const img = new Image();
@@ -442,7 +451,7 @@ export default function Playground() {
               img.src = imageUrl;
             });
 
-            // Create the layer first
+            // Create the layer with the asset
             const layerId = await createLayer(currentProject.id, {
               id: nanoid(),
               type: 'image' as const,
@@ -453,7 +462,8 @@ export default function Playground() {
                 width: imageSize.width,
                 height: imageSize.height,
                 rotation: 0,
-                scale: 1,
+                scaleX: 1,
+                scaleY: 1,
                 opacity: 1,
                 blendMode: 'normal',
               },
@@ -465,15 +475,7 @@ export default function Playground() {
               getProjectWithLayers(currentProject.id),
             ]);
 
-            // Update all states in a single batch to ensure synchronization
-            setAssetData((prev) => ({
-              ...prev,
-              [assetId]: {
-                url: imageUrl,
-                loading: false,
-                error: false,
-              },
-            }));
+            // Update all states in a single batch
             setLayerData(layers);
             setCurrentProject(fullProject);
             setSelectedLayerId(layerId);
@@ -512,7 +514,8 @@ export default function Playground() {
           width: 200,
           height: 50,
           rotation: 0,
-          scale: 1,
+          scaleX: 1,
+          scaleY: 1,
           opacity: 1,
           blendMode: 'normal',
         },
@@ -562,11 +565,6 @@ export default function Playground() {
     try {
       // Update the layer in the database
       await updateLayer(updatedLayer.id, updatedLayer);
-
-      // Update local state
-      const updatedLayers = currentProject.layers.map((layer) =>
-        layer.id === updatedLayer.id ? { ...layer } : layer
-      );
 
       // Get the updated layer data from the database to ensure consistency
       const [layers, fullProject] = await Promise.all([

@@ -7,7 +7,6 @@ import {
   getStickerAssetData,
   getCanvasSettings,
   updateCanvasSettings,
-  createImageAsset,
 } from '@/lib/db';
 import { ZoomIn, ZoomOut, Move } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -61,9 +60,6 @@ export function Canvas({
   selectedLayerId,
   onLayerSelect,
   onLayerUpdate,
-  onLayerReorder,
-  onLayerDelete,
-  onLayerDuplicate,
   showCanvasResizeHandles = true,
   className,
   onAssetDataChange,
@@ -108,9 +104,6 @@ export function Canvas({
   const [canvasResizeHandle, setCanvasResizeHandle] = useState<
     'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null
   >(null);
-  const [isLayerPanelOpen, setIsLayerPanelOpen] = useState(false);
-  const [layerPanelTriggerRef, setLayerPanelTriggerRef] =
-    useState<HTMLButtonElement | null>(null);
   const hasInitialCentered = useRef(false);
 
   // Use either external or internal zoom
@@ -435,84 +428,6 @@ export function Canvas({
     };
   }, [canvasBackground.type, canvasBackground.imageUrl]);
 
-  const handleBackgroundColorChange = async (color: string) => {
-    try {
-      await updateCanvasSettings(projectId, {
-        backgroundType: 'color',
-        backgroundColor: color,
-      });
-      onBackgroundChange({
-        type: 'color',
-        color,
-      });
-    } catch (error) {
-      console.error('Failed to update background color:', error);
-      toast.error('Failed to update background color');
-    }
-  };
-
-  const handleBackgroundImageChange = async (file: File) => {
-    try {
-      // First, read the file as an ArrayBuffer
-      const buffer = await file.arrayBuffer();
-      const data = new Uint8Array(buffer);
-
-      // Create a new image asset
-      const imageId = await createImageAsset(file.name, file.type, data);
-
-      // Create blob URL for immediate display
-      const blob = new Blob([data], { type: file.type });
-      const imageUrl = URL.createObjectURL(blob);
-
-      // Get image dimensions
-      const img = new Image();
-      const imageSize = await new Promise<{ width: number; height: number }>(
-        (resolve, reject) => {
-          img.onload = () =>
-            resolve({ width: img.naturalWidth, height: img.naturalHeight });
-          img.onerror = reject;
-          img.src = imageUrl;
-        }
-      );
-
-      // Update canvas settings to use the new image
-      await updateCanvasSettings(projectId, {
-        backgroundType: 'image',
-        backgroundImageId: imageId,
-      });
-
-      // Clean up old background image URL if it exists
-      if (canvasBackground.type === 'image' && canvasBackground.imageUrl) {
-        URL.revokeObjectURL(canvasBackground.imageUrl);
-      }
-
-      // Update through props
-      onBackgroundChange({
-        type: 'image',
-        imageId,
-        imageUrl,
-        imageSize,
-      });
-
-      toast.success('Background image updated');
-    } catch (error) {
-      console.error('Failed to update background image:', error);
-      toast.error('Failed to update background image');
-    }
-  };
-
-  const handleClearBackground = async () => {
-    try {
-      await updateCanvasSettings(projectId, {
-        backgroundType: 'none',
-      });
-      onBackgroundChange({ type: 'none' });
-    } catch (error) {
-      console.error('Failed to clear background:', error);
-      toast.error('Failed to clear background');
-    }
-  };
-
   // Handle layer selection
   const handleLayerClick = (e: React.MouseEvent, layerId: string) => {
     e.stopPropagation();
@@ -637,10 +552,12 @@ export function Canvas({
           newTransform.rotation -= ROTATE_AMOUNT;
           break;
         case '+':
-          newTransform.scale += SCALE_AMOUNT;
+          newTransform.scaleX += SCALE_AMOUNT;
+          newTransform.scaleY += SCALE_AMOUNT;
           break;
         case '-':
-          newTransform.scale -= SCALE_AMOUNT;
+          newTransform.scaleX -= SCALE_AMOUNT;
+          newTransform.scaleY -= SCALE_AMOUNT;
           break;
         case '[':
           newTransform.opacity = Math.max(
@@ -702,14 +619,6 @@ export function Canvas({
       return;
     }
     setEditingTextId(null);
-  };
-
-  const getLayerPosition = (layer: Layer) => {
-    if (!canvasRef.current) return { top: 0, left: 0 };
-    const canvasRect = canvasRef.current.getBoundingClientRect();
-    const x = canvasRect.left + layer.transform.x * zoom;
-    const y = canvasRect.top + layer.transform.y * zoom;
-    return { top: y, left: x };
   };
 
   const handleResizeStart = (
@@ -778,7 +687,7 @@ export function Canvas({
       style: {
         transform: `translate(${layer.transform.x}px, ${layer.transform.y}px) 
                    rotate(${layer.transform.rotation}deg) 
-                   scale(${layer.transform.scale})`,
+                   scale(${layer.transform.scaleX}, ${layer.transform.scaleY})`,
         width: layer.transform.width,
         height: layer.transform.height,
         opacity: layer.transform.opacity,

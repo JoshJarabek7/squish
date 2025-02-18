@@ -6,7 +6,8 @@ export const TransformSchema = z.object({
   width: z.number(),
   height: z.number(),
   rotation: z.number(),
-  scale: z.number(),
+  scaleX: z.number(),
+  scaleY: z.number(),
   opacity: z.number(),
   blendMode: z.string(),
 });

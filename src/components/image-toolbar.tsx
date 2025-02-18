@@ -1,4 +1,4 @@
-import { Layer, ImageLayer, StickerLayer } from '@/types/ProjectType';
+import { ImageLayer, StickerLayer } from '@/types/ProjectType';
 import { useState } from 'react';
 import {
   FlipHorizontal,
@@ -38,7 +38,6 @@ interface ImageToolbarProps {
 
 export function ImageToolbar({
   layer,
-  onUpdate,
   onFlipHorizontal,
   onFlipVertical,
   onStartEraserMode,
