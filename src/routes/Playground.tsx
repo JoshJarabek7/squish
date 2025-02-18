@@ -752,6 +752,15 @@ export default function Playground() {
         // Update the project's last modified timestamp
         await updateProjectTimestamp(currentProject.id);
 
+        // Reload layer data to ensure consistency
+        const [layers, fullProject] = await Promise.all([
+          getProjectLayers(currentProject.id),
+          getProjectWithLayers(currentProject.id),
+        ]);
+
+        setCurrentProject(fullProject);
+        setLayerData(layers);
+
         // If we get here, the operation was successful
         return;
       } catch (error) {
@@ -1083,7 +1092,7 @@ export default function Playground() {
       // Prepare layers data for export
       const exportLayers: ExportLayer[] = layerData
         .sort((a, b) => compareLayersForRender(a, b, currentProject.layers))
-        .map((layer) => {
+        .map((layer): ExportLayer => {
           const baseLayer = {
             type: layer.type,
             transform: layer.transform,
@@ -1092,37 +1101,53 @@ export default function Playground() {
           if (layer.type === 'text') {
             return {
               ...baseLayer,
+              type: 'text' as const,
               content: layer.content,
               style: layer.style,
             };
-          } else if (layer.type === 'image' || layer.type === 'sticker') {
+          } else {
             const assetId =
               layer.type === 'image'
                 ? layer.imageAssetId
                 : layer.stickerAssetId;
             const asset = assetData[assetId];
+            if (!asset?.url) {
+              throw new Error(`Missing asset URL for layer ${layer.id}`);
+            }
             return {
               ...baseLayer,
-              imageUrl: asset?.url,
+              type: layer.type as 'image' | 'sticker',
+              imageUrl: asset.url,
             };
           }
-
-          return baseLayer;
         });
 
       // Prepare background data
-      const background = {
-        type: canvasBackground.type,
-        color: canvasBackground.color,
-        imageUrl: canvasBackground.imageUrl,
-      };
+      const exportBackground = (() => {
+        if (canvasBackground.type === 'color' && canvasBackground.color) {
+          return {
+            type: 'color' as const,
+            color: canvasBackground.color,
+          };
+        } else if (
+          canvasBackground.type === 'image' &&
+          canvasBackground.imageUrl
+        ) {
+          return {
+            type: 'image' as const,
+            imageUrl: canvasBackground.imageUrl,
+          };
+        } else {
+          return { type: 'none' as const };
+        }
+      })();
 
       // Export canvas as image
       const blob = await exportCanvasAsImage(
         exportLayers,
         settings.width,
         settings.height,
-        background
+        exportBackground
       );
 
       // Convert blob to Uint8Array for Tauri

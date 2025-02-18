@@ -12,6 +12,7 @@ import { ZoomIn, ZoomOut, Move } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { compareLayersForRender } from '@/lib/utils';
+import { LayerContextMenu } from '@/components/layer-context-menu';
 
 interface CanvasProps {
   projectId: string;
@@ -73,7 +74,9 @@ export function Canvas({
   selectedLayerId,
   onLayerSelect,
   onLayerUpdate,
+  onLayerReorder,
   onLayerDelete,
+  onLayerDuplicate,
   showCanvasResizeHandles = true,
   className,
   onAssetDataChange,
@@ -459,6 +462,7 @@ export function Canvas({
 
   // Handle layer dragging
   const handleMouseDown = (e: React.MouseEvent, layer: Layer) => {
+    if (e.button !== 0) return; // Only handle left click
     if (editingTextId === layer.id) return; // Don't start drag while editing text
     if (layer.id !== selectedLayerId || isResizing || isPanning) return;
     if (isResizing) return; // Explicitly prevent drag during resize
@@ -1252,7 +1256,7 @@ export function Canvas({
         'absolute select-none layer',
         isDragging && isSelected ? 'cursor-grabbing' : 'cursor-grab',
         layer.type === 'text' && editingTextId === layer.id && 'cursor-text',
-        isResizing && 'pointer-events-none' // Add pointer-events-none when resizing
+        isResizing && 'pointer-events-none'
       ),
       style: {
         transform: `translate(${layer.transform.x}px, ${layer.transform.y}px) 
@@ -1266,11 +1270,10 @@ export function Canvas({
         zIndex: layerIndex * 10,
         pointerEvents: isResizing
           ? 'none'
-          : ('auto' as React.CSSProperties['pointerEvents']), // Fix type
+          : ('auto' as React.CSSProperties['pointerEvents']),
       },
       onClick: (e: React.MouseEvent) => handleLayerClick(e, layer.id),
       onMouseDown: (e: React.MouseEvent) => {
-        // Prevent drag start if we're resizing
         if (isResizing) {
           e.stopPropagation();
           e.preventDefault();
@@ -1280,456 +1283,509 @@ export function Canvas({
       },
     };
 
-    switch (layer.type) {
-      case 'image':
-      case 'sticker': {
-        const assetId =
-          layer.type === 'image' ? layer.imageAssetId : layer.stickerAssetId;
-        const asset = assetData[assetId];
+    const handleLayerReorder = async (direction: 'up' | 'down') => {
+      const currentIndex = layers.find((l) => l.id === layer.id)?.index ?? 0;
+      const targetIndex =
+        direction === 'up' ? currentIndex + 1 : currentIndex - 1;
+      if (targetIndex >= 0 && targetIndex < layers.length) {
+        await onLayerReorder(layer.id, targetIndex);
 
-        if (!asset || asset.loading) {
-          return (
-            <div key={layer.id} {...commonProps}>
-              <div className='w-full h-full bg-accent/20 flex items-center justify-center'>
-                <span className='text-accent-foreground'>Loading...</span>
-              </div>
-            </div>
-          );
-        }
-
-        if (asset.error) {
-          return (
-            <div key={layer.id} {...commonProps}>
-              <div className='w-full h-full bg-destructive/20 flex items-center justify-center'>
-                <span className='text-destructive'>Failed to load image</span>
-              </div>
-            </div>
-          );
-        }
-
-        return (
-          <div key={layer.id} {...commonProps}>
-            <img
-              src={asset.url}
-              alt=''
-              className='w-full h-full object-contain'
-              draggable={false}
-            />
-            {/* Selection border */}
-            {selectedLayerId === layer.id && (
-              <>
-                <div className='absolute -inset-[4px] z-selection pointer-events-none overflow-visible'>
-                  <div className='absolute inset-0 rainbow-border' />
-                </div>
-                {/* Rotation handle */}
-                <div
-                  className='absolute left-1/2 -top-8 w-0.5 h-8 bg-orange-500 origin-bottom cursor-grab active:cursor-grabbing'
-                  onMouseDown={(e) => handleRotationStart(e, layer)}
-                >
-                  <div className='absolute -top-1.5 left-1/2 w-3 h-3 -translate-x-1/2 bg-orange-500 rounded-full ring-2 ring-background shadow-md' />
-                </div>
-                {/* Resize handles */}
-                {(() => {
-                  const isFlippedX = (layer.transform.scaleX ?? 1) < 0;
-                  const isFlippedY = (layer.transform.scaleY ?? 1) < 0;
-
-                  // Adjust cursor directions based on flip state
-                  const getCursor = (handle: string) => {
-                    switch (handle) {
-                      case 'nw':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}-resize`;
-                      case 'ne':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'sw':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}-resize`;
-                      case 'se':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'n':
-                        return `${isFlippedY ? 's' : 'n'}-resize`;
-                      case 's':
-                        return `${isFlippedY ? 'n' : 's'}-resize`;
-                      case 'e':
-                        return `${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'w':
-                        return `${isFlippedX ? 'e' : 'w'}-resize`;
-                      default:
-                        return 'move';
-                    }
-                  };
-
-                  // Adjust handle type based on flip state
-                  const getHandle = (handle: string) => {
-                    switch (handle) {
-                      case 'nw':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}`;
-                      case 'ne':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}`;
-                      case 'sw':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}`;
-                      case 'se':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}`;
-                      default:
-                        return handle;
-                    }
-                  };
-
-                  return (
-                    <>
-                      {/* Corner handles - always shown */}
-                      <div
-                        className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('nw') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('nw') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('ne') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('ne') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('sw') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('sw') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('se') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('se') as any);
-                        }}
-                      />
-                    </>
-                  );
-                })()}
-              </>
-            )}
-          </div>
-        );
+        // Update local layer data state
+        const updatedLayers = await getProjectLayers(projectId);
+        setLayerData(updatedLayers);
       }
+    };
 
-      case 'text': {
-        const isEditing = editingTextId === layer.id;
-        return (
-          <div
-            key={layer.id}
-            {...commonProps}
-            onDoubleClick={(e) => handleTextDoubleClick(e, layer)}
-            className={cn(
-              commonProps.className,
-              'flex items-center justify-center overflow-visible',
-              layer.style.wordWrap === 'break-word' &&
-                'whitespace-normal break-words',
-              layer.style.wordWrap === 'normal' && 'whitespace-nowrap',
-              isEditing && 'cursor-text'
-            )}
-            style={{
-              ...commonProps.style,
-              pointerEvents: isEditing ? 'none' : 'auto',
-            }}
-          >
-            {isEditing ? (
-              <>
-                {/* Editable text container */}
-                <div
-                  contentEditable
-                  suppressContentEditableWarning
-                  onInput={(e) => handleContentEditableChange(e, layer)}
-                  onBlur={handleTextBlur}
-                  onClick={(e) => e.stopPropagation()}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onKeyDown={(e) => e.stopPropagation()}
-                  ref={(el) => {
-                    if (el && isEditing) {
-                      el.focus();
-                      // Place cursor at end of text
-                      const range = document.createRange();
-                      const sel = window.getSelection();
-                      range.selectNodeContents(el);
-                      range.collapse(false);
-                      sel?.removeAllRanges();
-                      sel?.addRange(range);
-                    }
-                  }}
-                  className='w-full h-full bg-transparent outline-none'
-                  style={
-                    {
-                      fontFamily: layer.style.fontFamily,
-                      fontSize: layer.style.fontSize,
-                      fontWeight: layer.style.fontWeight,
-                      color: layer.style.color,
-                      backgroundColor:
-                        layer.style.backgroundColor || 'transparent',
-                      textAlign: layer.style.textAlign,
-                      fontStyle: layer.style.italic ? 'italic' : 'normal',
-                      textDecoration: layer.style.underline
-                        ? 'underline'
-                        : 'none',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems:
-                        layer.style.textAlign === 'left'
-                          ? 'flex-start'
-                          : layer.style.textAlign === 'right'
-                            ? 'flex-end'
-                            : 'center',
-                      justifyContent:
-                        layer.style.verticalAlign === 'top'
-                          ? 'flex-start'
-                          : layer.style.verticalAlign === 'bottom'
-                            ? 'flex-end'
-                            : 'center',
-                      whiteSpace:
-                        layer.style.wordWrap === 'break-word'
-                          ? 'pre-wrap'
-                          : 'pre',
-                      overflow: 'hidden',
-                      width: '100%',
-                      height: '100%',
-                      userSelect: 'text',
-                      cursor: 'text',
-                      wordBreak:
-                        layer.style.wordWrap === 'break-word'
-                          ? 'break-word'
-                          : 'normal',
-                      wordWrap: layer.style.wordWrap,
-                      pointerEvents: 'auto',
-                      '--text-stroke-width': layer.style.stroke?.enabled
-                        ? `${layer.style.stroke.width}px`
-                        : '0',
-                      '--text-stroke-color': layer.style.stroke?.enabled
-                        ? layer.style.stroke.color
-                        : 'transparent',
-                      WebkitTextStrokeWidth: 'var(--text-stroke-width)',
-                      WebkitTextStrokeColor: 'var(--text-stroke-color)',
-                    } as React.CSSProperties
-                  }
-                >
-                  {layer.content}
-                </div>
-              </>
-            ) : (
-              // Non-editing view
-              <div
-                className='w-full h-full'
-                onClick={(e) => handleLayerClick(e, layer.id)}
-                onMouseDown={(e) => handleMouseDown(e, layer)}
-                style={
-                  {
-                    fontFamily: layer.style.fontFamily,
-                    fontSize: layer.style.fontSize,
-                    fontWeight: layer.style.fontWeight,
-                    color: layer.style.color,
-                    backgroundColor:
-                      layer.style.backgroundColor || 'transparent',
-                    textAlign: layer.style.textAlign,
-                    fontStyle: layer.style.italic ? 'italic' : 'normal',
-                    textDecoration: layer.style.underline
-                      ? 'underline'
-                      : 'none',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems:
-                      layer.style.textAlign === 'left'
-                        ? 'flex-start'
-                        : layer.style.textAlign === 'right'
-                          ? 'flex-end'
-                          : 'center',
-                    justifyContent:
-                      layer.style.verticalAlign === 'top'
-                        ? 'flex-start'
-                        : layer.style.verticalAlign === 'bottom'
-                          ? 'flex-end'
-                          : 'center',
-                    whiteSpace:
-                      layer.style.wordWrap === 'break-word'
-                        ? 'pre-wrap'
-                        : 'pre',
-                    wordBreak:
-                      layer.style.wordWrap === 'break-word'
-                        ? 'break-word'
-                        : 'normal',
-                    wordWrap: layer.style.wordWrap,
-                    '--text-stroke-width': layer.style.stroke?.enabled
-                      ? `${layer.style.stroke.width}px`
-                      : '0',
-                    '--text-stroke-color': layer.style.stroke?.enabled
-                      ? layer.style.stroke.color
-                      : 'transparent',
-                    WebkitTextStrokeWidth: 'var(--text-stroke-width)',
-                    WebkitTextStrokeColor: 'var(--text-stroke-color)',
-                    userSelect: 'none',
-                    pointerEvents: 'auto',
-                    overflow: 'hidden',
-                  } as React.CSSProperties
-                }
+    const layerContent = (() => {
+      switch (layer.type) {
+        case 'image':
+        case 'sticker': {
+          const assetId =
+            layer.type === 'image' ? layer.imageAssetId : layer.stickerAssetId;
+          const asset = assetData[assetId];
+
+          if (!asset || asset.loading) {
+            return (
+              <LayerContextMenu
+                key={layer.id}
+                layer={layer}
+                onLayerUpdate={onLayerUpdate}
+                onLayerDelete={() => onLayerDelete(layer.id)}
+                onLayerDuplicate={() => onLayerDuplicate(layer.id)}
+                onLayerReorder={handleLayerReorder}
               >
-                <div className='w-full'>{layer.content}</div>
-              </div>
-            )}
-
-            {/* Selection border */}
-            {selectedLayerId === layer.id && (
-              <>
-                <div className='absolute -inset-[4px] z-selection pointer-events-none overflow-visible'>
-                  <div className='absolute inset-0 rainbow-border' />
+                <div {...commonProps}>
+                  <div className='w-full h-full bg-accent/20 flex items-center justify-center'>
+                    <span className='text-accent-foreground'>Loading...</span>
+                  </div>
                 </div>
-                {/* Rotation handle */}
-                <div
-                  className='absolute left-1/2 -top-8 w-0.5 h-8 bg-orange-500 origin-bottom cursor-grab active:cursor-grabbing'
-                  onMouseDown={(e) => handleRotationStart(e, layer)}
-                >
-                  <div className='absolute -top-1.5 left-1/2 w-3 h-3 -translate-x-1/2 bg-orange-500 rounded-full ring-2 ring-background shadow-md' />
+              </LayerContextMenu>
+            );
+          }
+
+          if (asset.error) {
+            return (
+              <LayerContextMenu
+                key={layer.id}
+                layer={layer}
+                onLayerUpdate={onLayerUpdate}
+                onLayerDelete={() => onLayerDelete(layer.id)}
+                onLayerDuplicate={() => onLayerDuplicate(layer.id)}
+                onLayerReorder={handleLayerReorder}
+              >
+                <div {...commonProps}>
+                  <div className='w-full h-full bg-destructive/20 flex items-center justify-center'>
+                    <span className='text-destructive'>
+                      Failed to load image
+                    </span>
+                  </div>
                 </div>
-                {/* Resize handles */}
-                {(() => {
-                  const isFlippedX = (layer.transform.scaleX ?? 1) < 0;
-                  const isFlippedY = (layer.transform.scaleY ?? 1) < 0;
+              </LayerContextMenu>
+            );
+          }
 
-                  // Adjust cursor directions based on flip state
-                  const getCursor = (handle: string) => {
-                    switch (handle) {
-                      case 'nw':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}-resize`;
-                      case 'ne':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'sw':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}-resize`;
-                      case 'se':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'n':
-                        return `${isFlippedY ? 's' : 'n'}-resize`;
-                      case 's':
-                        return `${isFlippedY ? 'n' : 's'}-resize`;
-                      case 'e':
-                        return `${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'w':
-                        return `${isFlippedX ? 'e' : 'w'}-resize`;
-                      default:
-                        return 'move';
-                    }
-                  };
+          return (
+            <LayerContextMenu
+              key={layer.id}
+              layer={layer}
+              onLayerUpdate={onLayerUpdate}
+              onLayerDelete={() => onLayerDelete(layer.id)}
+              onLayerDuplicate={() => onLayerDuplicate(layer.id)}
+              onLayerReorder={handleLayerReorder}
+            >
+              <div {...commonProps}>
+                <img
+                  src={asset.url}
+                  alt=''
+                  className='w-full h-full object-contain'
+                  draggable={false}
+                />
+                {/* Selection border */}
+                {selectedLayerId === layer.id && (
+                  <>
+                    <div className='absolute -inset-[4px] z-selection pointer-events-none overflow-visible'>
+                      <div className='absolute inset-0 rainbow-border' />
+                    </div>
+                    {/* Rotation handle */}
+                    <div
+                      className='absolute left-1/2 -top-8 w-0.5 h-8 bg-orange-500 origin-bottom cursor-grab active:cursor-grabbing'
+                      onMouseDown={(e) => handleRotationStart(e, layer)}
+                    >
+                      <div className='absolute -top-1.5 left-1/2 w-3 h-3 -translate-x-1/2 bg-orange-500 rounded-full ring-2 ring-background shadow-md' />
+                    </div>
+                    {/* Resize handles */}
+                    {(() => {
+                      const isFlippedX = (layer.transform.scaleX ?? 1) < 0;
+                      const isFlippedY = (layer.transform.scaleY ?? 1) < 0;
 
-                  // Adjust handle type based on flip state
-                  const getHandle = (handle: string) => {
-                    switch (handle) {
-                      case 'nw':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}`;
-                      case 'ne':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}`;
-                      case 'sw':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}`;
-                      case 'se':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}`;
-                      default:
-                        return handle;
-                    }
-                  };
+                      // Adjust cursor directions based on flip state
+                      const getCursor = (handle: string) => {
+                        switch (handle) {
+                          case 'nw':
+                            return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}-resize`;
+                          case 'ne':
+                            return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}-resize`;
+                          case 'sw':
+                            return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}-resize`;
+                          case 'se':
+                            return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}-resize`;
+                          case 'n':
+                            return `${isFlippedY ? 's' : 'n'}-resize`;
+                          case 's':
+                            return `${isFlippedY ? 'n' : 's'}-resize`;
+                          case 'e':
+                            return `${isFlippedX ? 'w' : 'e'}-resize`;
+                          case 'w':
+                            return `${isFlippedX ? 'e' : 'w'}-resize`;
+                          default:
+                            return 'move';
+                        }
+                      };
 
-                  return (
-                    <>
-                      {/* Corner handles - always shown */}
-                      <div
-                        className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('nw') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('nw') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('ne') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('ne') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('sw') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('sw') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('se') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('se') as any);
-                        }}
-                      />
+                      // Adjust handle type based on flip state
+                      const getHandle = (handle: string) => {
+                        switch (handle) {
+                          case 'nw':
+                            return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}`;
+                          case 'ne':
+                            return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}`;
+                          case 'sw':
+                            return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}`;
+                          case 'se':
+                            return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}`;
+                          default:
+                            return handle;
+                        }
+                      };
 
-                      {/* Edge handles - only shown for text layers */}
-                      {layer.type === 'text' && (
+                      return (
                         <>
+                          {/* Corner handles - always shown */}
                           <div
-                            className='absolute top-1/2 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                            style={{ cursor: getCursor('w') }}
+                            className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('nw') }}
                             onMouseDown={(e) => {
                               e.stopPropagation();
                               e.preventDefault();
-                              handleResizeStart(e, getHandle('w') as any);
+                              handleResizeStart(e, getHandle('nw') as any);
                             }}
                           />
                           <div
-                            className='absolute top-1/2 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                            style={{ cursor: getCursor('e') }}
+                            className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('ne') }}
                             onMouseDown={(e) => {
                               e.stopPropagation();
                               e.preventDefault();
-                              handleResizeStart(e, getHandle('e') as any);
+                              handleResizeStart(e, getHandle('ne') as any);
                             }}
                           />
                           <div
-                            className='absolute -top-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                            style={{ cursor: getCursor('n') }}
+                            className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('sw') }}
                             onMouseDown={(e) => {
                               e.stopPropagation();
                               e.preventDefault();
-                              handleResizeStart(e, getHandle('n') as any);
+                              handleResizeStart(e, getHandle('sw') as any);
                             }}
                           />
                           <div
-                            className='absolute -bottom-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                            style={{ cursor: getCursor('s') }}
+                            className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('se') }}
                             onMouseDown={(e) => {
                               e.stopPropagation();
                               e.preventDefault();
-                              handleResizeStart(e, getHandle('s') as any);
+                              handleResizeStart(e, getHandle('se') as any);
                             }}
                           />
                         </>
-                      )}
-                    </>
-                  );
-                })()}
-              </>
-            )}
-          </div>
-        );
+                      );
+                    })()}
+                  </>
+                )}
+              </div>
+            </LayerContextMenu>
+          );
+        }
+        case 'text': {
+          const isEditing = editingTextId === layer.id;
+          return (
+            <LayerContextMenu
+              key={layer.id}
+              layer={layer}
+              onLayerUpdate={onLayerUpdate}
+              onLayerDelete={() => onLayerDelete(layer.id)}
+              onLayerDuplicate={() => onLayerDuplicate(layer.id)}
+              onLayerReorder={handleLayerReorder}
+            >
+              <div
+                {...commonProps}
+                onDoubleClick={(e) => handleTextDoubleClick(e, layer)}
+                className={cn(
+                  commonProps.className,
+                  'flex items-center justify-center overflow-visible',
+                  layer.style.wordWrap === 'break-word' &&
+                    'whitespace-normal break-words',
+                  layer.style.wordWrap === 'normal' && 'whitespace-nowrap',
+                  isEditing && 'cursor-text'
+                )}
+                style={{
+                  ...commonProps.style,
+                  pointerEvents: isEditing ? 'none' : 'auto',
+                }}
+              >
+                {isEditing ? (
+                  <>
+                    {/* Editable text container */}
+                    <div
+                      contentEditable
+                      suppressContentEditableWarning
+                      onInput={(e) => handleContentEditableChange(e, layer)}
+                      onBlur={handleTextBlur}
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => e.stopPropagation()}
+                      ref={(el) => {
+                        if (el && isEditing) {
+                          el.focus();
+                          // Place cursor at end of text
+                          const range = document.createRange();
+                          const sel = window.getSelection();
+                          range.selectNodeContents(el);
+                          range.collapse(false);
+                          sel?.removeAllRanges();
+                          sel?.addRange(range);
+                        }
+                      }}
+                      className='w-full h-full bg-transparent outline-none'
+                      style={
+                        {
+                          fontFamily: layer.style.fontFamily,
+                          fontSize: layer.style.fontSize,
+                          fontWeight: layer.style.fontWeight,
+                          color: layer.style.color,
+                          backgroundColor:
+                            layer.style.backgroundColor || 'transparent',
+                          textAlign: layer.style.textAlign,
+                          fontStyle: layer.style.italic ? 'italic' : 'normal',
+                          textDecoration: layer.style.underline
+                            ? 'underline'
+                            : 'none',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems:
+                            layer.style.textAlign === 'left'
+                              ? 'flex-start'
+                              : layer.style.textAlign === 'right'
+                                ? 'flex-end'
+                                : 'center',
+                          justifyContent:
+                            layer.style.verticalAlign === 'top'
+                              ? 'flex-start'
+                              : layer.style.verticalAlign === 'bottom'
+                                ? 'flex-end'
+                                : 'center',
+                          whiteSpace:
+                            layer.style.wordWrap === 'break-word'
+                              ? 'pre-wrap'
+                              : 'pre',
+                          overflow: 'hidden',
+                          width: '100%',
+                          height: '100%',
+                          userSelect: 'text',
+                          cursor: 'text',
+                          wordBreak:
+                            layer.style.wordWrap === 'break-word'
+                              ? 'break-word'
+                              : 'normal',
+                          wordWrap: layer.style.wordWrap,
+                          pointerEvents: 'auto',
+                          '--text-stroke-width': layer.style.stroke?.enabled
+                            ? `${layer.style.stroke.width}px`
+                            : '0',
+                          '--text-stroke-color': layer.style.stroke?.enabled
+                            ? layer.style.stroke.color
+                            : 'transparent',
+                          WebkitTextStrokeWidth: 'var(--text-stroke-width)',
+                          WebkitTextStrokeColor: 'var(--text-stroke-color)',
+                        } as React.CSSProperties
+                      }
+                    >
+                      {layer.content}
+                    </div>
+                  </>
+                ) : (
+                  // Non-editing view
+                  <div
+                    className='w-full h-full'
+                    onClick={(e) => handleLayerClick(e, layer.id)}
+                    onMouseDown={(e) => handleMouseDown(e, layer)}
+                    style={
+                      {
+                        fontFamily: layer.style.fontFamily,
+                        fontSize: layer.style.fontSize,
+                        fontWeight: layer.style.fontWeight,
+                        color: layer.style.color,
+                        backgroundColor:
+                          layer.style.backgroundColor || 'transparent',
+                        textAlign: layer.style.textAlign,
+                        fontStyle: layer.style.italic ? 'italic' : 'normal',
+                        textDecoration: layer.style.underline
+                          ? 'underline'
+                          : 'none',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems:
+                          layer.style.textAlign === 'left'
+                            ? 'flex-start'
+                            : layer.style.textAlign === 'right'
+                              ? 'flex-end'
+                              : 'center',
+                        justifyContent:
+                          layer.style.verticalAlign === 'top'
+                            ? 'flex-start'
+                            : layer.style.verticalAlign === 'bottom'
+                              ? 'flex-end'
+                              : 'center',
+                        whiteSpace:
+                          layer.style.wordWrap === 'break-word'
+                            ? 'pre-wrap'
+                            : 'pre',
+                        wordBreak:
+                          layer.style.wordWrap === 'break-word'
+                            ? 'break-word'
+                            : 'normal',
+                        wordWrap: layer.style.wordWrap,
+                        '--text-stroke-width': layer.style.stroke?.enabled
+                          ? `${layer.style.stroke.width}px`
+                          : '0',
+                        '--text-stroke-color': layer.style.stroke?.enabled
+                          ? layer.style.stroke.color
+                          : 'transparent',
+                        WebkitTextStrokeWidth: 'var(--text-stroke-width)',
+                        WebkitTextStrokeColor: 'var(--text-stroke-color)',
+                        userSelect: 'none',
+                        pointerEvents: 'auto',
+                        overflow: 'hidden',
+                      } as React.CSSProperties
+                    }
+                  >
+                    <div className='w-full'>{layer.content}</div>
+                  </div>
+                )}
+
+                {/* Selection border */}
+                {selectedLayerId === layer.id && (
+                  <>
+                    <div className='absolute -inset-[4px] z-selection pointer-events-none overflow-visible'>
+                      <div className='absolute inset-0 rainbow-border' />
+                    </div>
+                    {/* Rotation handle */}
+                    <div
+                      className='absolute left-1/2 -top-8 w-0.5 h-8 bg-orange-500 origin-bottom cursor-grab active:cursor-grabbing'
+                      onMouseDown={(e) => handleRotationStart(e, layer)}
+                    >
+                      <div className='absolute -top-1.5 left-1/2 w-3 h-3 -translate-x-1/2 bg-orange-500 rounded-full ring-2 ring-background shadow-md' />
+                    </div>
+                    {/* Resize handles */}
+                    {(() => {
+                      const isFlippedX = (layer.transform.scaleX ?? 1) < 0;
+                      const isFlippedY = (layer.transform.scaleY ?? 1) < 0;
+
+                      // Adjust cursor directions based on flip state
+                      const getCursor = (handle: string) => {
+                        switch (handle) {
+                          case 'nw':
+                            return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}-resize`;
+                          case 'ne':
+                            return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}-resize`;
+                          case 'sw':
+                            return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}-resize`;
+                          case 'se':
+                            return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}-resize`;
+                          case 'n':
+                            return `${isFlippedY ? 's' : 'n'}-resize`;
+                          case 's':
+                            return `${isFlippedY ? 'n' : 's'}-resize`;
+                          case 'e':
+                            return `${isFlippedX ? 'w' : 'e'}-resize`;
+                          case 'w':
+                            return `${isFlippedX ? 'e' : 'w'}-resize`;
+                          default:
+                            return 'move';
+                        }
+                      };
+
+                      // Adjust handle type based on flip state
+                      const getHandle = (handle: string) => {
+                        switch (handle) {
+                          case 'nw':
+                            return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}`;
+                          case 'ne':
+                            return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}`;
+                          case 'sw':
+                            return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}`;
+                          case 'se':
+                            return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}`;
+                          default:
+                            return handle;
+                        }
+                      };
+
+                      return (
+                        <>
+                          {/* Corner handles - always shown */}
+                          <div
+                            className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('nw') }}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              handleResizeStart(e, getHandle('nw') as any);
+                            }}
+                          />
+                          <div
+                            className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('ne') }}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              handleResizeStart(e, getHandle('ne') as any);
+                            }}
+                          />
+                          <div
+                            className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('sw') }}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              handleResizeStart(e, getHandle('sw') as any);
+                            }}
+                          />
+                          <div
+                            className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                            style={{ cursor: getCursor('se') }}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              handleResizeStart(e, getHandle('se') as any);
+                            }}
+                          />
+
+                          {/* Edge handles - only shown for text layers */}
+                          {layer.type === 'text' && (
+                            <>
+                              <div
+                                className='absolute top-1/2 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                                style={{ cursor: getCursor('w') }}
+                                onMouseDown={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  handleResizeStart(e, getHandle('w') as any);
+                                }}
+                              />
+                              <div
+                                className='absolute top-1/2 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                                style={{ cursor: getCursor('e') }}
+                                onMouseDown={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  handleResizeStart(e, getHandle('e') as any);
+                                }}
+                              />
+                              <div
+                                className='absolute -top-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                                style={{ cursor: getCursor('n') }}
+                                onMouseDown={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  handleResizeStart(e, getHandle('n') as any);
+                                }}
+                              />
+                              <div
+                                className='absolute -bottom-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                                style={{ cursor: getCursor('s') }}
+                                onMouseDown={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  handleResizeStart(e, getHandle('s') as any);
+                                }}
+                              />
+                            </>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </>
+                )}
+              </div>
+            </LayerContextMenu>
+          );
+        }
       }
-    }
+    })();
+
+    return layerContent;
   };
 
   // Sort layers for rendering
