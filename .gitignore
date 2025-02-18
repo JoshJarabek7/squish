@@ -27,3 +27,9 @@ dist-ssr
 *.sql
 *.md
 !README.md
+!db.ts
+!utils.ts
+!src/lib
+.prettierignore
+.prettier*
+eslint*

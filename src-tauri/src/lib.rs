@@ -1,34 +1,30 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
-use tauri::{TitleBarStyle, WebviewWindowBuilder, WebviewUrl, Manager};
+use tauri::{Manager, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
 
 #[cfg(target_os = "macos")]
 use cocoa::{
-    appkit::{NSWindow, NSWindowStyleMask, NSWindowCollectionBehavior},
+    appkit::{NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask},
     base::id,
 };
 
 mod fonts;
-use fonts::{FontState, get_system_fonts, initialize_fonts};
+use fonts::{get_system_fonts, initialize_empty_state, FontState};
 
 pub fn create_window(app: &tauri::App) -> tauri::Result<()> {
-    // Initialize font state
-    let fonts = initialize_fonts();
-    
-    // Store fonts in app state
-    println!("Storing {} fonts in app state", fonts.len());
-    app.manage(FontState(std::sync::Mutex::new(fonts)));
+    // Initialize empty font state
+    let empty_state = initialize_empty_state();
 
-    let window = WebviewWindowBuilder::new(
-        app,
-        "main",
-        WebviewUrl::default()
-    )
-    .title("Squish")
-    .inner_size(1200.0, 800.0)
-    .decorations(true)
-    .title_bar_style(TitleBarStyle::Visible)
-    .build()?;
+    // Store empty font state
+    println!("Initializing empty font state");
+    app.manage(FontState(std::sync::Mutex::new(empty_state)));
+
+    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+        .title("Squish")
+        .inner_size(1200.0, 800.0)
+        .decorations(true)
+        .title_bar_style(TitleBarStyle::Visible)
+        .build()?;
 
     #[cfg(target_os = "macos")]
     {
@@ -38,10 +34,10 @@ pub fn create_window(app: &tauri::App) -> tauri::Result<()> {
             style_mask |= NSWindowStyleMask::NSTexturedBackgroundWindowMask;
             style_mask |= NSWindowStyleMask::NSTitledWindowMask;
             ns_window.setStyleMask_(style_mask);
-            
+
             // Set window to appear in all spaces
             ns_window.setCollectionBehavior_(
-                NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces,
             );
         }
     }
@@ -52,7 +48,7 @@ pub fn create_window(app: &tauri::App) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_sql::Builder::new().build())
+        .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             create_window(app)?;

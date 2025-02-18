@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from 'zod';
 
 export const TransformSchema = z.object({
   x: z.number(),
@@ -50,11 +50,13 @@ export const TextStyleSchema = z.object({
   underline: z.boolean(),
   verticalAlign: z.enum(['top', 'center', 'bottom']),
   wordWrap: z.enum(['normal', 'break-word']),
-  stroke: z.object({
-    width: z.number(),
-    color: z.string(),
-    enabled: z.boolean(),
-  }).optional(),
+  stroke: z
+    .object({
+      width: z.number(),
+      color: z.string(),
+      enabled: z.boolean(),
+    })
+    .optional(),
 });
 
 export const TextLayerSchema = BaseLayerSchema.extend({
@@ -66,12 +68,14 @@ export const TextLayerSchema = BaseLayerSchema.extend({
 export const ImageLayerSchema = BaseLayerSchema.extend({
   type: z.literal('image'),
   imageAssetId: z.string(),
-  crop: z.object({
-    x: z.number(),
-    y: z.number(),
-    width: z.number(),
-    height: z.number(),
-  }).optional(),
+  crop: z
+    .object({
+      x: z.number(),
+      y: z.number(),
+      width: z.number(),
+      height: z.number(),
+    })
+    .optional(),
 });
 
 export const StickerLayerSchema = BaseLayerSchema.extend({
@@ -109,12 +113,15 @@ export const ActionSchema = z.object({
 export const ProjectSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
-  layers: z.array(z.object({
-    id: z.string(), // Reference to layer
-    index: z.number(), // Layer stack index
-  })),
+  layers: z.array(
+    z.object({
+      id: z.string(), // Reference to layer
+      index: z.number(), // Layer stack index
+    })
+  ),
   currentActionIndex: z.number().default(-1), // For undo/redo
   createdAt: z.date(),
+  updatedAt: z.date(),
 });
 
 // Export types

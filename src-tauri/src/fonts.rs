@@ -2,32 +2,31 @@ use font_kit::source::SystemSource;
 use std::sync::Mutex;
 use tauri::State;
 
-// Store fonts in app state
-pub struct FontState(pub(crate) Mutex<Vec<String>>);
+// Store fonts in app state with a loaded flag
+pub struct FontState(pub(crate) Mutex<(Vec<String>, bool)>);
 
 #[tauri::command]
 pub fn get_system_fonts(state: State<FontState>) -> Result<Vec<String>, String> {
-    println!("Retrieving system fonts from state...");
-    match state.0.lock() {
-        Ok(fonts) => {
-            let fonts = fonts.clone();
-            println!("Successfully retrieved {} fonts", fonts.len());
-            if fonts.is_empty() {
-                println!("Warning: Font list is empty, reinitializing...");
-                return Ok(initialize_fonts());
-            }
-            Ok(fonts)
-        },
-        Err(e) => {
-            let error_msg = format!("Failed to access font cache: {}", e);
-            println!("{}", error_msg);
-            Err(error_msg)
-        }
+    let mut state_guard = state.0.lock().map_err(|e| format!("Failed to lock state: {}", e))?;
+    let (fonts, loaded) = &mut *state_guard;
+    
+    if !*loaded {
+        println!("Loading system fonts on first request...");
+        *fonts = initialize_fonts();
+        *loaded = true;
+    } else {
+        println!("Using cached system fonts");
     }
+    
+    Ok(fonts.clone())
 }
 
-pub fn initialize_fonts() -> Vec<String> {
-    println!("Loading system fonts during setup...");
+pub fn initialize_empty_state() -> (Vec<String>, bool) {
+    (Vec::new(), false)
+}
+
+fn initialize_fonts() -> Vec<String> {
+    println!("Loading system fonts...");
     let source = SystemSource::new();
     
     let fallback_fonts = vec![

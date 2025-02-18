@@ -1,80 +1,174 @@
-import { useRef, useState, useEffect } from "react";
-import { Layer } from "@/types/ProjectType";
-import { cn } from "@/lib/utils";
-import { getProjectLayers, getImageAssetData, getStickerAssetData, getCanvasSettings, updateCanvasSettings } from "@/lib/db";
-import { LayerToolbar, TextLayerToolbar } from "@/components/layer-toolbar";
-import { ZoomIn, ZoomOut, Move } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { createPortal } from "react-dom";
+import { useRef, useState, useEffect } from 'react';
+import { Layer } from '@/types/ProjectType';
+import { cn } from '@/lib/utils';
+import {
+  getProjectLayers,
+  getImageAssetData,
+  getStickerAssetData,
+  getCanvasSettings,
+  updateCanvasSettings,
+  createImageAsset,
+} from '@/lib/db';
+import { ZoomIn, ZoomOut, Move } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
+import { compareLayersForRender } from '@/lib/utils';
 
 interface CanvasProps {
   projectId: string;
   layers: Array<{ id: string; index: number }>;
   selectedLayerId: string | null;
   onLayerSelect: (id: string | null) => void;
-  onLayerUpdate: (layer: Layer) => void;
+  onLayerUpdate: (layer: Layer) => Promise<void>;
   onLayerReorder: (layerId: string, newIndex: number) => void;
   onLayerDelete: (layerId: string) => void;
   onLayerDuplicate: (layerId: string) => void;
   showCanvasResizeHandles?: boolean;
   className?: string;
+  onAssetDataChange?: (assetData: {
+    [key: string]: { url: string; loading: boolean; error: boolean };
+  }) => void;
+  canvasSettingsVersion?: number;
+  canvasBackground: {
+    type: 'color' | 'image' | 'none';
+    color?: string;
+    imageId?: string;
+    imageUrl?: string;
+    imageSize?: { width: number; height: number };
+  };
+  onBackgroundChange: (background: {
+    type: 'color' | 'image' | 'none';
+    color?: string;
+    imageId?: string;
+    imageUrl?: string;
+    imageSize?: { width: number; height: number };
+  }) => void;
+  zoom?: number;
+  onZoomChange?: (zoom: number) => void;
 }
 
-// Add type for asset loading results
-type AssetLoadResult = [string, string] | null;
+interface AssetCache {
+  [key: string]: {
+    url: string;
+    loading: boolean;
+    error: boolean;
+  };
+}
 
-export function Canvas({ 
+export function Canvas({
   projectId,
-  layers, 
-  selectedLayerId, 
-  onLayerSelect, 
+  layers,
+  selectedLayerId,
+  onLayerSelect,
   onLayerUpdate,
   onLayerReorder,
   onLayerDelete,
   onLayerDuplicate,
   showCanvasResizeHandles = true,
-  className 
+  className,
+  onAssetDataChange,
+  canvasSettingsVersion = 0,
+  canvasBackground,
+  onBackgroundChange,
+  zoom: externalZoom,
+  onZoomChange,
 }: CanvasProps) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [layerData, setLayerData] = useState<Layer[]>([]);
-  const [assetData, setAssetData] = useState<Record<string, string>>({});
+  const [assetData, setAssetData] = useState<AssetCache>({});
   const [isEraserMode, setIsEraserMode] = useState(false);
   const [eraserPath, setEraserPath] = useState<Array<[number, number]>>([]);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
+  const [internalZoom, setInternalZoom] = useState(1);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [viewportOffset, setViewportOffset] = useState({ x: 0, y: 0 });
   const [canvasSize, setCanvasSize] = useState({ width: 1920, height: 1080 });
   const [isResizing, setIsResizing] = useState(false);
-  const [resizeHandle, setResizeHandle] = useState<'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null>(null);
-  const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0 });
+  const [resizeHandle, setResizeHandle] = useState<
+    'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null
+  >(null);
+  const [resizeStart, setResizeStart] = useState({
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+  });
   const [dragLayer, setDragLayer] = useState<Layer | null>(null);
   const [isCanvasResizing, setIsCanvasResizing] = useState(false);
-  const [canvasResizeStart, setCanvasResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0 });
-  const [canvasResizeHandle, setCanvasResizeHandle] = useState<'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null>(null);
+  const [canvasResizeStart, setCanvasResizeStart] = useState({
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+  });
+  const [canvasResizeHandle, setCanvasResizeHandle] = useState<
+    'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null
+  >(null);
+  const [isLayerPanelOpen, setIsLayerPanelOpen] = useState(false);
+  const [layerPanelTriggerRef, setLayerPanelTriggerRef] =
+    useState<HTMLButtonElement | null>(null);
+  const hasInitialCentered = useRef(false);
+
+  // Use either external or internal zoom
+  const zoom = externalZoom ?? internalZoom;
+  const setZoom = (newZoom: number) => {
+    if (onZoomChange) {
+      onZoomChange(newZoom);
+    } else {
+      setInternalZoom(newZoom);
+    }
+  };
+
+  // Function to handle zoom changes with mouse position
+  const handleZoom = (delta: number, clientX?: number, clientY?: number) => {
+    const minZoom = 0.1;
+    const maxZoom = 5;
+    const newZoom = Math.min(Math.max(minZoom, zoom + delta), maxZoom);
+
+    if (clientX !== undefined && clientY !== undefined && canvasRef.current) {
+      // Get the canvas rect
+      const rect = canvasRef.current.getBoundingClientRect();
+
+      // Calculate the point on the canvas where we're zooming
+      const x = (clientX - rect.left) / zoom;
+      const y = (clientY - rect.top) / zoom;
+
+      // Calculate new offsets to keep the zoom point stationary
+      const newOffsetX = x * (zoom - newZoom);
+      const newOffsetY = y * (zoom - newZoom);
+
+      // Update viewport offset to maintain zoom point
+      setViewportOffset((prev) => ({
+        x: prev.x + newOffsetX,
+        y: prev.y + newOffsetY,
+      }));
+    }
+
+    setZoom(newZoom);
+  };
 
   // Add this helper function near the top of the component
   const logLayerOrder = (message: string) => {
-    const layerOrder = layers.map(l => ({
+    const layerOrder = layers.map((l) => ({
       id: l.id,
       index: l.index,
-      type: layerData.find(ld => ld.id === l.id)?.type
+      type: layerData.find((ld) => ld.id === l.id)?.type,
     }));
 
     const renderOrder = [...layerData]
       .sort((a, b) => {
-        const aIndex = layers.find(l => l.id === a.id)?.index ?? 0;
-        const bIndex = layers.find(l => l.id === b.id)?.index ?? 0;
+        const aIndex = layers.find((l) => l.id === a.id)?.index ?? 0;
+        const bIndex = layers.find((l) => l.id === b.id)?.index ?? 0;
         return aIndex - bIndex;
       })
-      .map(l => ({
+      .map((l) => ({
         id: l.id,
         type: l.type,
-        index: layers.find(layer => layer.id === l.id)?.index
+        index: layers.find((layer) => layer.id === l.id)?.index,
       }));
 
     console.log(`\n=== ${message} ===`);
@@ -91,70 +185,57 @@ export function Canvas({
 
     // Get the workspace dimensions
     const workspaceRect = workspace.getBoundingClientRect();
-    const workspaceWidth = Math.round(workspaceRect.width);
-    const workspaceHeight = Math.round(workspaceRect.height);
+    const workspaceWidth = workspaceRect.width;
+    const workspaceHeight = workspaceRect.height;
 
     // Calculate zoom to fit canvas in viewport with padding
     const padding = 40; // 20px padding on each side
     const horizontalZoom = (workspaceWidth - padding * 2) / canvasSize.width;
     const verticalZoom = (workspaceHeight - padding * 2) / canvasSize.height;
-    const newZoom = Number(Math.min(horizontalZoom, verticalZoom, 1).toFixed(3)); // Don't zoom in past 100%
+    const newZoom = Math.min(horizontalZoom, verticalZoom, 1); // Don't zoom in past 100%
 
     // Calculate the scaled canvas dimensions
-    const scaledCanvasWidth = Math.round(canvasSize.width * newZoom);
-    const scaledCanvasHeight = Math.round(canvasSize.height * newZoom);
+    const scaledCanvasWidth = canvasSize.width * newZoom;
+    const scaledCanvasHeight = canvasSize.height * newZoom;
 
     // Calculate the position to center the canvas in the workspace
     const newX = Math.round((workspaceWidth - scaledCanvasWidth) / 2);
     const newY = Math.round((workspaceHeight - scaledCanvasHeight) / 2);
 
-    // Batch the state updates to prevent multiple rerenders
-    requestAnimationFrame(() => {
-      setZoom(newZoom);
-      setViewportOffset({ x: newX, y: newY });
-    });
+    // Update state
+    setZoom(newZoom);
+    setViewportOffset({ x: newX, y: newY });
   };
 
-  // Call centerAndFitCanvas when project is loaded or canvas size changes
+  // Call centerAndFitCanvas ONLY on initial project load
   useEffect(() => {
-    const timer = setTimeout(centerAndFitCanvas, 100);
-    return () => clearTimeout(timer);
-  }, [projectId, canvasSize.width, canvasSize.height]);
+    if (!hasInitialCentered.current && projectId) {
+      // Add a small delay to ensure the workspace has its final dimensions
+      const timer = setTimeout(centerAndFitCanvas, 100);
+      hasInitialCentered.current = true;
+      return () => clearTimeout(timer);
+    }
+  }, [projectId]);
 
-  // Also call centerAndFitCanvas when workspace is resized
+  // Reset hasInitialCentered when project changes
+  useEffect(() => {
+    hasInitialCentered.current = false;
+  }, [projectId]);
+
+  // Remove auto-centering from resize observer
   useEffect(() => {
     const workspace = workspaceRef.current;
     if (!workspace) return;
 
-    let resizeTimeout: number | null = null;
-    let isInitialResize = true;
-
-    const handleResize = () => {
-      if (resizeTimeout) {
-        window.clearTimeout(resizeTimeout);
-      }
-
-      // Skip the first resize after mounting
-      if (isInitialResize) {
-        isInitialResize = false;
-        return;
-      }
-
-      resizeTimeout = window.setTimeout(() => {
-        requestAnimationFrame(centerAndFitCanvas);
-      }, 100);
-    };
-
-    const resizeObserver = new ResizeObserver(handleResize);
+    const resizeObserver = new ResizeObserver(() => {
+      // Do nothing on resize - only manual centering is allowed
+    });
     resizeObserver.observe(workspace);
 
     return () => {
-      if (resizeTimeout) {
-        window.clearTimeout(resizeTimeout);
-      }
       resizeObserver.disconnect();
     };
-  }, [canvasSize.width, canvasSize.height]);
+  }, []);
 
   // Load layer data
   useEffect(() => {
@@ -166,131 +247,271 @@ export function Canvas({
         setLayerData(layers);
         logLayerOrder('After loading layers');
 
-        // Load assets for image and sticker layers
-        const assetPromises = layers
-          .filter(layer => layer.type === 'image' || layer.type === 'sticker')
-          .map(async layer => {
-            try {
-              console.log('Loading asset for layer:', {
-                layerId: layer.id,
-                type: layer.type,
-                assetId: layer.type === 'image' ? layer.imageAssetId : layer.stickerAssetId
-              });
-
-              const data = layer.type === 'image'
-                ? await getImageAssetData(layer.imageAssetId)
-                : await getStickerAssetData(layer.stickerAssetId);
-
-              console.log('Asset data loaded:', {
-                type: layer.type,
-                id: layer.type === 'image' ? layer.imageAssetId : layer.stickerAssetId,
-                dataLength: data instanceof Uint8Array ? data.length : data.data.length,
-                mimeType: 'mimeType' in data ? data.mimeType : 'image/jpeg',
-                isUint8Array: data instanceof Uint8Array,
-                hasData: Boolean(data),
-                firstFewBytes: Array.from(data instanceof Uint8Array ? data : data.data).slice(0, 4)
-              });
-
-              return [
-                layer.type === 'image' ? layer.imageAssetId : layer.stickerAssetId,
-                data
-              ] as [string, any];
-            } catch (error) {
-              console.error(
-                `Failed to load asset ${
-                  layer.type === 'image' ? layer.imageAssetId : layer.stickerAssetId
-                }:`, 
-                error
-              );
-              return null;
+        // Initialize asset loading state while preserving existing URLs
+        const newAssetData: AssetCache = { ...assetData };
+        layers
+          .filter((layer) => layer.type === 'image' || layer.type === 'sticker')
+          .forEach((layer) => {
+            const assetId =
+              layer.type === 'image'
+                ? layer.imageAssetId
+                : layer.stickerAssetId;
+            // Only load if we don't already have a non-error URL
+            if (!newAssetData[assetId] || newAssetData[assetId].error) {
+              newAssetData[assetId] = {
+                url: newAssetData[assetId]?.url || '',
+                loading: true,
+                error: false,
+              };
             }
           });
 
-        const loadedAssets = (await Promise.all(assetPromises))
-          .filter((result): result is [string, any] => result !== null)
-          .reduce((acc, [id, data]) => {
-            try {
-              // Get the correct MIME type and data
-              const mimeType = data instanceof Uint8Array ? 'image/jpeg' : data.mimeType;
-              const binaryData = data instanceof Uint8Array ? data : data.data;
+        // Update asset data in a separate effect to avoid render phase updates
+        setAssetData(newAssetData);
 
-              if (!binaryData || binaryData.length === 0) {
-                console.error('Invalid binary data:', {
-                  id,
-                  hasData: Boolean(binaryData),
-                  length: binaryData?.length,
-                  type: typeof binaryData,
-                  isUint8Array: binaryData instanceof Uint8Array
-                });
-                return acc;
-              }
+        // Load assets in parallel
+        const loadPromises = layers
+          .filter((layer) => layer.type === 'image' || layer.type === 'sticker')
+          .map(async (layer) => {
+            const assetId =
+              layer.type === 'image'
+                ? layer.imageAssetId
+                : layer.stickerAssetId;
 
-              // Ensure we have a Uint8Array
-              const uint8Array = binaryData instanceof Uint8Array 
-                ? binaryData 
-                : new Uint8Array(binaryData);
-
-              if (uint8Array.length === 0) {
-                console.error('Empty Uint8Array after conversion:', {
-                  id,
-                  originalLength: binaryData.length,
-                  convertedLength: uint8Array.length
-                });
-                return acc;
-              }
-
-              console.log('Creating asset URL:', {
-                id,
-                mimeType,
-                dataLength: uint8Array.length,
-                firstFewBytes: Array.from(uint8Array.slice(0, 4))
-              });
-
-              // Create a blob from the Uint8Array
-              const blob = new Blob([uint8Array], { type: mimeType });
-              const assetUrl = URL.createObjectURL(blob);
-
-              console.log('Asset URL created:', {
-                id,
-                urlLength: assetUrl.length,
-                previewUrl: assetUrl.substring(0, 100) + '...'
-              });
-
-              return { ...acc, [id]: assetUrl };
-            } catch (error) {
-              console.error('Failed to create asset URL:', {
-                id,
-                error,
-                data: data instanceof Uint8Array ? 'Uint8Array' : typeof data,
-                hasData: Boolean(data),
-                dataLength: data instanceof Uint8Array ? data.length : data?.data?.length
-              });
-              return acc;
+            // Skip if we already have a valid URL
+            if (newAssetData[assetId]?.url && !newAssetData[assetId].error) {
+              return;
             }
-          }, {});
 
-        console.log('Loaded assets:', Object.keys(loadedAssets));
-        setAssetData(loadedAssets);
+            try {
+              const data = await (layer.type === 'image'
+                ? getImageAssetData(assetId)
+                : getStickerAssetData(assetId));
+
+              const binaryData = data instanceof Uint8Array ? data : data.data;
+              const mimeType =
+                data instanceof Uint8Array ? 'image/png' : data.mimeType;
+
+              const blob = new Blob([binaryData], { type: mimeType });
+
+              // Clean up old URL if it exists
+              if (newAssetData[assetId]?.url) {
+                URL.revokeObjectURL(newAssetData[assetId].url);
+              }
+
+              const url = URL.createObjectURL(blob);
+              setAssetData((prev) => ({
+                ...prev,
+                [assetId]: { url, loading: false, error: false },
+              }));
+            } catch (error) {
+              console.error(`Failed to load asset ${assetId}:`, error);
+              setAssetData((prev) => ({
+                ...prev,
+                [assetId]: {
+                  url: '',
+                  loading: false,
+                  error: true,
+                },
+              }));
+            }
+          });
+
+        await Promise.all(loadPromises);
       } catch (error) {
-        console.error("Failed to load layers:", error);
+        console.error('Failed to load layers:', error);
+        toast.error('Failed to load layers');
       }
     };
 
     loadLayers();
-  }, [projectId, layers]);
+  }, [projectId, canvasSettingsVersion]);
 
-  // Load canvas settings
+  // Effect to sync asset data changes with parent
+  useEffect(() => {
+    onAssetDataChange?.(assetData);
+  }, [assetData, onAssetDataChange]);
+
+  // Cleanup URLs when component unmounts
+  useEffect(() => {
+    return () => {
+      Object.values(assetData).forEach((asset) => {
+        if (asset.url) {
+          URL.revokeObjectURL(asset.url);
+        }
+      });
+    };
+  }, []);
+
+  // Load canvas settings including background
   useEffect(() => {
     const loadCanvasSettings = async () => {
       try {
         const settings = await getCanvasSettings(projectId);
-        setCanvasSize(settings);
+        setCanvasSize({
+          width: settings.width,
+          height: settings.height,
+        });
+
+        // Load background settings
+        if (settings.backgroundType === 'image' && settings.backgroundImageId) {
+          try {
+            const imageData = await getImageAssetData(
+              settings.backgroundImageId
+            );
+
+            // Create a new Image to ensure it's loaded before creating the blob URL
+            const img = new Image();
+            const loadPromise = new Promise<{ width: number; height: number }>(
+              (resolve, reject) => {
+                img.onload = () =>
+                  resolve({
+                    width: img.naturalWidth,
+                    height: img.naturalHeight,
+                  });
+                img.onerror = reject;
+              }
+            );
+
+            const blob = new Blob(
+              [imageData instanceof Uint8Array ? imageData : imageData.data],
+              {
+                type:
+                  imageData instanceof Uint8Array
+                    ? 'image/jpeg'
+                    : imageData.mimeType,
+              }
+            );
+            const imageUrl = URL.createObjectURL(blob);
+            img.src = imageUrl;
+
+            // Wait for image to load and get its dimensions
+            const imageSize = await loadPromise;
+
+            // Clean up old background image URL if it exists
+            if (
+              canvasBackground.type === 'image' &&
+              canvasBackground.imageUrl
+            ) {
+              URL.revokeObjectURL(canvasBackground.imageUrl);
+            }
+
+            onBackgroundChange({
+              type: 'image',
+              imageId: settings.backgroundImageId,
+              imageUrl,
+              imageSize,
+            });
+          } catch (error) {
+            console.error('Failed to load background image:', error);
+            onBackgroundChange({ type: 'none' });
+          }
+        } else if (
+          settings.backgroundType === 'color' &&
+          settings.backgroundColor
+        ) {
+          onBackgroundChange({
+            type: 'color',
+            color: settings.backgroundColor,
+          });
+        } else {
+          onBackgroundChange({ type: 'none' });
+        }
       } catch (error) {
-        console.error("Failed to load canvas settings:", error);
+        console.error('Failed to load canvas settings:', error);
       }
     };
     loadCanvasSettings();
-  }, [projectId]);
+  }, [projectId, canvasSettingsVersion]);
+
+  // Clean up background image URL on unmount or when changing
+  useEffect(() => {
+    const currentUrl =
+      canvasBackground.type === 'image' ? canvasBackground.imageUrl : null;
+    return () => {
+      if (currentUrl) {
+        URL.revokeObjectURL(currentUrl);
+      }
+    };
+  }, [canvasBackground.type, canvasBackground.imageUrl]);
+
+  const handleBackgroundColorChange = async (color: string) => {
+    try {
+      await updateCanvasSettings(projectId, {
+        backgroundType: 'color',
+        backgroundColor: color,
+      });
+      onBackgroundChange({
+        type: 'color',
+        color,
+      });
+    } catch (error) {
+      console.error('Failed to update background color:', error);
+      toast.error('Failed to update background color');
+    }
+  };
+
+  const handleBackgroundImageChange = async (file: File) => {
+    try {
+      // First, read the file as an ArrayBuffer
+      const buffer = await file.arrayBuffer();
+      const data = new Uint8Array(buffer);
+
+      // Create a new image asset
+      const imageId = await createImageAsset(file.name, file.type, data);
+
+      // Create blob URL for immediate display
+      const blob = new Blob([data], { type: file.type });
+      const imageUrl = URL.createObjectURL(blob);
+
+      // Get image dimensions
+      const img = new Image();
+      const imageSize = await new Promise<{ width: number; height: number }>(
+        (resolve, reject) => {
+          img.onload = () =>
+            resolve({ width: img.naturalWidth, height: img.naturalHeight });
+          img.onerror = reject;
+          img.src = imageUrl;
+        }
+      );
+
+      // Update canvas settings to use the new image
+      await updateCanvasSettings(projectId, {
+        backgroundType: 'image',
+        backgroundImageId: imageId,
+      });
+
+      // Clean up old background image URL if it exists
+      if (canvasBackground.type === 'image' && canvasBackground.imageUrl) {
+        URL.revokeObjectURL(canvasBackground.imageUrl);
+      }
+
+      // Update through props
+      onBackgroundChange({
+        type: 'image',
+        imageId,
+        imageUrl,
+        imageSize,
+      });
+
+      toast.success('Background image updated');
+    } catch (error) {
+      console.error('Failed to update background image:', error);
+      toast.error('Failed to update background image');
+    }
+  };
+
+  const handleClearBackground = async () => {
+    try {
+      await updateCanvasSettings(projectId, {
+        backgroundType: 'none',
+      });
+      onBackgroundChange({ type: 'none' });
+    } catch (error) {
+      console.error('Failed to clear background:', error);
+      toast.error('Failed to clear background');
+    }
+  };
 
   // Handle layer selection
   const handleLayerClick = (e: React.MouseEvent, layerId: string) => {
@@ -302,22 +523,13 @@ export function Canvas({
     onLayerSelect(layerId);
   };
 
-  // Handle canvas click (deselect)
-  const handleCanvasClick = (e: React.MouseEvent) => {
-    // Only deselect if clicking directly on the canvas background
-    if (e.target === e.currentTarget || e.target === canvasRef.current) {
-      onLayerSelect(null);
-      setEditingTextId(null);
-    }
-  };
-
   // Handle layer dragging
   const handleMouseDown = (e: React.MouseEvent, layer: Layer) => {
     if (editingTextId === layer.id) return; // Don't start drag while editing text
     if (layer.id !== selectedLayerId || isResizing || isPanning) return;
     e.stopPropagation();
     console.log('Starting drag for layer:', layer.id);
-    
+
     setIsDragging(true);
     setDragLayer(layer);
 
@@ -350,30 +562,33 @@ export function Canvas({
       const newX = mouseX - dragStart.x;
       const newY = mouseY - dragStart.y;
 
-      console.log('Moving layer to:', { newX, newY });
-
       // Update local state immediately for smooth dragging
-      setLayerData(prev => 
-        prev.map(l => l.id === dragLayer.id ? {
-          ...l,
-          transform: {
-            ...l.transform,
-            x: newX,
-            y: newY,
-          },
-        } : l)
+      setLayerData((prev) =>
+        prev.map((l) =>
+          l.id === dragLayer.id
+            ? {
+                ...l,
+                transform: {
+                  ...l.transform,
+                  x: newX,
+                  y: newY,
+                },
+              }
+            : l
+        )
       );
     };
 
     const handleMouseUp = () => {
       console.log('Ending drag for layer:', dragLayer.id);
-      
+
       // Get the final position and update the database
-      const layer = layerData.find(l => l.id === dragLayer.id);
+      const layer = layerData.find((l) => l.id === dragLayer.id);
       if (layer) {
-        onLayerUpdate(layer);
+        // Just update directly, let the DatabaseQueue handle serialization
+        void onLayerUpdate(layer);
       }
-      
+
       setIsDragging(false);
       setDragLayer(null);
     };
@@ -392,7 +607,7 @@ export function Canvas({
     if (!selectedLayerId) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      const layer = layerData.find(l => l.id === selectedLayerId);
+      const layer = layerData.find((l) => l.id === selectedLayerId);
       if (!layer) return;
 
       const MOVE_AMOUNT = 1;
@@ -403,35 +618,41 @@ export function Canvas({
       let newTransform = { ...layer.transform };
 
       switch (e.key) {
-        case "ArrowLeft":
+        case 'ArrowLeft':
           newTransform.x -= MOVE_AMOUNT;
           break;
-        case "ArrowRight":
+        case 'ArrowRight':
           newTransform.x += MOVE_AMOUNT;
           break;
-        case "ArrowUp":
+        case 'ArrowUp':
           newTransform.y -= MOVE_AMOUNT;
           break;
-        case "ArrowDown":
+        case 'ArrowDown':
           newTransform.y += MOVE_AMOUNT;
           break;
-        case "r":
+        case 'r':
           newTransform.rotation += ROTATE_AMOUNT;
           break;
-        case "R":
+        case 'R':
           newTransform.rotation -= ROTATE_AMOUNT;
           break;
-        case "+":
+        case '+':
           newTransform.scale += SCALE_AMOUNT;
           break;
-        case "-":
+        case '-':
           newTransform.scale -= SCALE_AMOUNT;
           break;
-        case "[":
-          newTransform.opacity = Math.max(0, newTransform.opacity - OPACITY_AMOUNT);
+        case '[':
+          newTransform.opacity = Math.max(
+            0,
+            newTransform.opacity - OPACITY_AMOUNT
+          );
           break;
-        case "]":
-          newTransform.opacity = Math.min(1, newTransform.opacity + OPACITY_AMOUNT);
+        case ']':
+          newTransform.opacity = Math.min(
+            1,
+            newTransform.opacity + OPACITY_AMOUNT
+          );
           break;
         default:
           return;
@@ -443,99 +664,9 @@ export function Canvas({
       });
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedLayerId, layerData, onLayerUpdate]);
-
-  const handleFlipHorizontal = () => {
-    const layer = layerData.find(l => l.id === selectedLayerId);
-    if (!layer) return;
-
-    onLayerUpdate({
-      ...layer,
-      transform: {
-        ...layer.transform,
-        scale: layer.transform.scale * -1, // Flip by inverting scale
-      },
-    });
-  };
-
-  const handleFlipVertical = () => {
-    const layer = layerData.find(l => l.id === selectedLayerId);
-    if (!layer) return;
-
-    onLayerUpdate({
-      ...layer,
-      transform: {
-        ...layer.transform,
-        scale: layer.transform.scale * -1, // Flip by inverting scale
-        rotation: layer.transform.rotation + 180, // Rotate to maintain orientation
-      },
-    });
-  };
-
-  const handleStartEraserMode = () => {
-    setIsEraserMode(true);
-    setEraserPath([]);
-  };
-
-  const handleEraserMouseMove = (e: React.MouseEvent) => {
-    if (!isEraserMode || !isDragging) return;
-
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    setEraserPath(prev => [...prev, [x, y]]);
-  };
-
-  const handleSplitByTransparency = () => {
-    if (eraserPath.length === 0) return;
-    // TODO: Implement transparency-based splitting using the eraser path
-    setIsEraserMode(false);
-    setEraserPath([]);
-  };
-
-  const handleMoveForward = () => {
-    const currentIndex = layers.find(l => l.id === selectedLayerId)?.index ?? 0;
-    const nextLayer = layers
-      .filter(l => l.id !== selectedLayerId)
-      .find(l => l.index > currentIndex);
-    if (nextLayer) {
-      console.log('Moving layer forward:', {
-        layerId: selectedLayerId,
-        fromIndex: currentIndex,
-        toIndex: nextLayer.index,
-        affectedLayer: nextLayer.id
-      });
-      onLayerReorder(selectedLayerId!, nextLayer.index);
-      logLayerOrder('After moving layer forward');
-    }
-  };
-
-  const handleMoveBackward = () => {
-    const currentIndex = layers.find(l => l.id === selectedLayerId)?.index ?? 0;
-    const prevLayer = layers
-      .filter(l => l.id !== selectedLayerId)
-      .sort((a, b) => b.index - a.index)  // Sort in descending order to find closest lower index
-      .find(l => l.index < currentIndex);
-    if (prevLayer) {
-      console.log('Moving layer backward:', {
-        layerId: selectedLayerId,
-        fromIndex: currentIndex,
-        toIndex: prevLayer.index,
-        affectedLayer: prevLayer.id
-      });
-      onLayerReorder(selectedLayerId!, prevLayer.index);
-      logLayerOrder('After moving layer backward');
-    }
-  };
-
-  const handleSegment = (mode: 'bounding-box' | 'auto' | 'semantic') => {
-    // TODO: Implement segmentation using the selected mode
-    console.log('Segmentation mode:', mode);
-  };
 
   const handleTextDoubleClick = (e: React.MouseEvent, layer: Layer) => {
     if (layer.type !== 'text') return;
@@ -545,10 +676,12 @@ export function Canvas({
     onLayerSelect(layer.id);
   };
 
-  // ContentEditable change handler. Grabs textContent from the editing div.
-  const handleContentEditableChange = (e: React.FormEvent<HTMLDivElement>, layer: Layer) => {
+  const handleContentEditableChange = (
+    e: React.FormEvent<HTMLDivElement>,
+    layer: Layer
+  ) => {
     if (layer.type !== 'text') return;
-    const newContent = e.currentTarget.textContent ?? "";
+    const newContent = e.currentTarget.textContent ?? '';
     if (newContent !== layer.content) {
       onLayerUpdate({
         ...layer,
@@ -558,45 +691,90 @@ export function Canvas({
   };
 
   const handleTextBlur = (e: React.FocusEvent) => {
-    // Prevent blur if clicking within the toolbar, on elements marked with data-ignore-blur, or within a contenteditable
+    // Prevent blur if clicking within the toolbar or on elements marked with data-ignore-blur
     const relatedTarget = e.relatedTarget as HTMLElement;
-    if (relatedTarget && (
-      relatedTarget.closest('.text-toolbar') ||
-      relatedTarget.closest('[data-ignore-blur]') ||
-      relatedTarget.closest('[contenteditable="true"]')
-    )) {
+    if (
+      relatedTarget &&
+      (relatedTarget.closest('.text-toolbar') ||
+        relatedTarget.closest('[data-ignore-blur]') ||
+        relatedTarget.closest('[contenteditable="true"]'))
+    ) {
       return;
     }
     setEditingTextId(null);
   };
 
-  const renderLayer = (layer: Layer) => {
-    // Get the layer's current index from the layers prop
-    const layerIndex = layers.find(l => l.id === layer.id)?.index ?? 0;
-    const isSelected = selectedLayerId === layer.id;
-    
-    console.log('Rendering layer:', {
-      id: layer.id,
-      type: layer.type,
-      index: layerIndex,
-      zIndex: layerIndex * 10 // Use multiplier to leave room between indices
-    });
+  const getLayerPosition = (layer: Layer) => {
+    if (!canvasRef.current) return { top: 0, left: 0 };
+    const canvasRect = canvasRef.current.getBoundingClientRect();
+    const x = canvasRect.left + layer.transform.x * zoom;
+    const y = canvasRect.top + layer.transform.y * zoom;
+    return { top: y, left: x };
+  };
 
-    // Get layer element position for toolbar positioning
-    const getLayerPosition = () => {
-      if (!canvasRef.current) return { top: 0, left: 0 };
-      const canvasRect = canvasRef.current.getBoundingClientRect();
-      const x = canvasRect.left + (layer.transform.x * zoom);
-      const y = canvasRect.top + (layer.transform.y * zoom);
-      return { top: y, left: x };
-    };
+  const handleResizeStart = (
+    e: React.MouseEvent<HTMLDivElement>,
+    handle: 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
+  ) => {
+    if (!selectedLayerId) return;
+
+    e.stopPropagation();
+    e.preventDefault();
+
+    const layer = layerData.find((l) => l.id === selectedLayerId);
+    if (!layer) return;
+
+    setIsResizing(true);
+    setResizeHandle(handle);
+    setResizeStart({
+      x: e.clientX,
+      y: e.clientY,
+      width: layer.transform.width,
+      height: layer.transform.height,
+    });
+  };
+
+  // Update the calculateScaledDimensions function
+  const calculateScaledDimensions = (
+    imageWidth: number,
+    imageHeight: number,
+    canvasWidth: number,
+    canvasHeight: number
+  ) => {
+    const imageAspectRatio = imageWidth / imageHeight;
+    const canvasAspectRatio = canvasWidth / canvasHeight;
+
+    let scaledWidth: number;
+    let scaledHeight: number;
+
+    // Scale to cover the canvas while maintaining aspect ratio
+    if (imageAspectRatio > canvasAspectRatio) {
+      // Image is wider than canvas (relative to height)
+      scaledHeight = canvasHeight;
+      scaledWidth = canvasHeight * imageAspectRatio;
+    } else {
+      // Image is taller than canvas (relative to width)
+      scaledWidth = canvasWidth;
+      scaledHeight = canvasWidth / imageAspectRatio;
+    }
+
+    // Center the image
+    const x = (canvasWidth - scaledWidth) / 2;
+    const y = (canvasHeight - scaledHeight) / 2;
+
+    return { width: scaledWidth, height: scaledHeight, x, y };
+  };
+
+  const renderLayer = (layer: Layer) => {
+    const layerIndex = layers.find((l) => l.id === layer.id)?.index ?? 0;
+    const isSelected = selectedLayerId === layer.id;
 
     const commonProps = {
       className: cn(
-        "absolute select-none",
-        isSelected && "ring-2 ring-primary ring-offset-2",
-        isDragging && isSelected ? "cursor-grabbing" : "cursor-grab",
-        layer.type === 'text' && editingTextId === layer.id && "cursor-text"
+        'absolute select-none layer',
+        isSelected && 'ring-2 ring-primary ring-offset-2',
+        isDragging && isSelected ? 'cursor-grabbing' : 'cursor-grab',
+        layer.type === 'text' && editingTextId === layer.id && 'cursor-text'
       ),
       style: {
         transform: `translate(${layer.transform.x}px, ${layer.transform.y}px) 
@@ -605,71 +783,37 @@ export function Canvas({
         width: layer.transform.width,
         height: layer.transform.height,
         opacity: layer.transform.opacity,
-        mixBlendMode: layer.transform.blendMode as React.CSSProperties['mixBlendMode'],
+        mixBlendMode: layer.transform
+          .blendMode as React.CSSProperties['mixBlendMode'],
         zIndex: layerIndex * 10, // Use multiplier to leave room between indices
       },
       onClick: (e: React.MouseEvent) => handleLayerClick(e, layer.id),
       onMouseDown: (e: React.MouseEvent) => handleMouseDown(e, layer),
     };
 
-    // Render toolbar in portal
-    const renderToolbar = () => {
-      if (!isSelected) return null;
-      const pos = getLayerPosition();
-      
-      return createPortal(
-        <div 
-          className="fixed"
-          style={{ 
-            top: pos.top - 48,
-            left: pos.left,
-            transform: `scale(${zoom})`,
-            transformOrigin: 'bottom left',
-            zIndex: 9999,
-          }}
-        >
-          {layer.type === 'text' ? (
-            <TextLayerToolbar
-              layer={layer as any}
-              isEditing={editingTextId === layer.id}
-              onMoveForward={handleMoveForward}
-              onMoveBackward={handleMoveBackward}
-              onDelete={() => onLayerDelete(layer.id)}
-              onDuplicate={() => onLayerDuplicate(layer.id)}
-              onUpdate={(updates) => onLayerUpdate({ ...layer, ...updates } as Layer)}
-            />
-          ) : (
-            <LayerToolbar
-              layer={layer}
-              onFlipHorizontal={handleFlipHorizontal}
-              onFlipVertical={handleFlipVertical}
-              onStartEraserMode={handleStartEraserMode}
-              onSplitByTransparency={handleSplitByTransparency}
-              onMoveForward={handleMoveForward}
-              onMoveBackward={handleMoveBackward}
-              onDelete={() => onLayerDelete(layer.id)}
-              onDuplicate={() => onLayerDuplicate(layer.id)}
-              onSegment={handleSegment}
-            />
-          )}
-        </div>,
-        document.body
-      );
-    };
-
     switch (layer.type) {
       case 'image':
       case 'sticker': {
-        const assetId = layer.type === 'image' ? layer.imageAssetId : layer.stickerAssetId;
-        const assetUrl = assetData[assetId];
-        
-        if (!assetUrl) {
+        const assetId =
+          layer.type === 'image' ? layer.imageAssetId : layer.stickerAssetId;
+        const asset = assetData[assetId];
+
+        if (!asset || asset.loading) {
           return (
             <div key={layer.id} {...commonProps}>
-              <div className="w-full h-full bg-red-500/20 flex items-center justify-center">
-                <span className="text-red-500">Failed to load image</span>
+              <div className='w-full h-full bg-accent/20 flex items-center justify-center'>
+                <span className='text-accent-foreground'>Loading...</span>
               </div>
-              {renderToolbar()}
+            </div>
+          );
+        }
+
+        if (asset.error) {
+          return (
+            <div key={layer.id} {...commonProps}>
+              <div className='w-full h-full bg-destructive/20 flex items-center justify-center'>
+                <span className='text-destructive'>Failed to load image</span>
+              </div>
             </div>
           );
         }
@@ -677,34 +821,57 @@ export function Canvas({
         return (
           <div key={layer.id} {...commonProps}>
             <img
-              src={assetUrl}
-              alt=""
-              className="w-full h-full object-contain"
+              src={asset.url}
+              alt=''
+              className='w-full h-full object-contain'
               draggable={false}
             />
-            <div className="absolute inset-0 border-2 border-dashed border-primary border-opacity-50" />
+            <div className='absolute inset-0 border-2 border-dashed border-primary border-opacity-50' />
             {/* Resize handles */}
             {isSelected && (
               <>
-                <div className="absolute -top-1 -left-1 w-2 h-2 bg-primary rounded-full cursor-nw-resize transform -translate-x-1/2 -translate-y-1/2"
-                  onMouseDown={(e) => handleResizeStart(e, 'nw')} />
-                <div className="absolute -top-1 -right-1 w-2 h-2 bg-primary rounded-full cursor-ne-resize transform translate-x-1/2 -translate-y-1/2"
-                  onMouseDown={(e) => handleResizeStart(e, 'ne')} />
-                <div className="absolute -bottom-1 -left-1 w-2 h-2 bg-primary rounded-full cursor-sw-resize transform -translate-x-1/2 translate-y-1/2"
-                  onMouseDown={(e) => handleResizeStart(e, 'sw')} />
-                <div className="absolute -bottom-1 -right-1 w-2 h-2 bg-primary rounded-full cursor-se-resize transform translate-x-1/2 translate-y-1/2"
-                  onMouseDown={(e) => handleResizeStart(e, 'se')} />
-                <div className="absolute top-1/2 -left-1 w-2 h-2 bg-primary rounded-full cursor-w-resize transform -translate-x-1/2 -translate-y-1/2"
-                  onMouseDown={(e) => handleResizeStart(e, 'w')} />
-                <div className="absolute top-1/2 -right-1 w-2 h-2 bg-primary rounded-full cursor-e-resize transform translate-x-1/2 -translate-y-1/2"
-                  onMouseDown={(e) => handleResizeStart(e, 'e')} />
-                <div className="absolute -top-1 left-1/2 w-2 h-2 bg-primary rounded-full cursor-n-resize transform -translate-x-1/2 -translate-y-1/2"
-                  onMouseDown={(e) => handleResizeStart(e, 'n')} />
-                <div className="absolute -bottom-1 left-1/2 w-2 h-2 bg-primary rounded-full cursor-s-resize transform -translate-x-1/2 translate-y-1/2"
-                  onMouseDown={(e) => handleResizeStart(e, 's')} />
+                <div
+                  className='absolute -top-1 -left-1 w-2 h-2 bg-primary rounded-full cursor-nw-resize transform -translate-x-1/2 -translate-y-1/2'
+                  style={{ zIndex: 999999 }}
+                  onMouseDown={(e) => handleResizeStart(e, 'nw')}
+                />
+                <div
+                  className='absolute -top-1 -right-1 w-2 h-2 bg-primary rounded-full cursor-ne-resize transform translate-x-1/2 -translate-y-1/2'
+                  style={{ zIndex: 999999 }}
+                  onMouseDown={(e) => handleResizeStart(e, 'ne')}
+                />
+                <div
+                  className='absolute -bottom-1 -left-1 w-2 h-2 bg-primary rounded-full cursor-sw-resize transform -translate-x-1/2 translate-y-1/2'
+                  style={{ zIndex: 999999 }}
+                  onMouseDown={(e) => handleResizeStart(e, 'sw')}
+                />
+                <div
+                  className='absolute -bottom-1 -right-1 w-2 h-2 bg-primary rounded-full cursor-se-resize transform translate-x-1/2 translate-y-1/2'
+                  style={{ zIndex: 999999 }}
+                  onMouseDown={(e) => handleResizeStart(e, 'se')}
+                />
+                <div
+                  className='absolute top-1/2 -left-1 w-2 h-2 bg-primary rounded-full cursor-w-resize transform -translate-x-1/2 -translate-y-1/2'
+                  style={{ zIndex: 999999 }}
+                  onMouseDown={(e) => handleResizeStart(e, 'w')}
+                />
+                <div
+                  className='absolute top-1/2 -right-1 w-2 h-2 bg-primary rounded-full cursor-e-resize transform translate-x-1/2 -translate-y-1/2'
+                  style={{ zIndex: 999999 }}
+                  onMouseDown={(e) => handleResizeStart(e, 'e')}
+                />
+                <div
+                  className='absolute -top-1 left-1/2 w-2 h-2 bg-primary rounded-full cursor-n-resize transform -translate-x-1/2 -translate-y-1/2'
+                  style={{ zIndex: 999999 }}
+                  onMouseDown={(e) => handleResizeStart(e, 'n')}
+                />
+                <div
+                  className='absolute -bottom-1 left-1/2 w-2 h-2 bg-primary rounded-full cursor-s-resize transform -translate-x-1/2 translate-y-1/2'
+                  style={{ zIndex: 999999 }}
+                  onMouseDown={(e) => handleResizeStart(e, 's')}
+                />
               </>
             )}
-            {renderToolbar()}
           </div>
         );
       }
@@ -712,16 +879,17 @@ export function Canvas({
       case 'text': {
         const isEditing = editingTextId === layer.id;
         return (
-          <div 
-            key={layer.id} 
+          <div
+            key={layer.id}
             {...commonProps}
             onDoubleClick={(e) => handleTextDoubleClick(e, layer)}
             className={cn(
               commonProps.className,
-              "flex items-center justify-center overflow-visible",
-              layer.style.wordWrap === 'break-word' && "whitespace-normal break-words",
-              layer.style.wordWrap === 'normal' && "whitespace-nowrap",
-              isEditing && "cursor-text"
+              'flex items-center justify-center overflow-visible',
+              layer.style.wordWrap === 'break-word' &&
+                'whitespace-normal break-words',
+              layer.style.wordWrap === 'normal' && 'whitespace-nowrap',
+              isEditing && 'cursor-text'
             )}
             style={{
               ...commonProps.style,
@@ -752,43 +920,59 @@ export function Canvas({
                       sel?.addRange(range);
                     }
                   }}
-                  className="w-full h-full bg-transparent outline-none"
-                  style={{
-                    fontFamily: layer.style.fontFamily,
-                    fontSize: layer.style.fontSize,
-                    fontWeight: layer.style.fontWeight,
-                    color: layer.style.color,
-                    backgroundColor: layer.style.backgroundColor || 'transparent',
-                    textAlign: layer.style.textAlign,
-                    fontStyle: layer.style.italic ? 'italic' : 'normal',
-                    textDecoration: layer.style.underline ? 'underline' : 'none',
-                    display: 'flex',
-                    alignItems:
-                      layer.style.verticalAlign === 'top'
-                        ? 'flex-start'
-                        : layer.style.verticalAlign === 'bottom'
-                        ? 'flex-end'
-                        : 'center',
-                    justifyContent:
-                      layer.style.textAlign === 'left'
-                        ? 'flex-start'
-                        : layer.style.textAlign === 'right'
-                        ? 'flex-end'
-                        : 'center',
-                    whiteSpace: layer.style.wordWrap === 'break-word' ? 'pre-wrap' : 'pre',
-                    overflow: 'hidden',
-                    width: '100%',
-                    height: '100%',
-                    userSelect: 'text',
-                    cursor: 'text',
-                    wordBreak: layer.style.wordWrap === 'break-word' ? 'break-word' : 'normal',
-                    wordWrap: layer.style.wordWrap,
-                    pointerEvents: 'auto',
-                    '--text-stroke-width': layer.style.stroke?.enabled ? `${layer.style.stroke.width}px` : '0',
-                    '--text-stroke-color': layer.style.stroke?.enabled ? layer.style.stroke.color : 'transparent',
-                    WebkitTextStrokeWidth: 'var(--text-stroke-width)',
-                    WebkitTextStrokeColor: 'var(--text-stroke-color)',
-                  } as React.CSSProperties}
+                  className='w-full h-full bg-transparent outline-none'
+                  style={
+                    {
+                      fontFamily: layer.style.fontFamily,
+                      fontSize: layer.style.fontSize,
+                      fontWeight: layer.style.fontWeight,
+                      color: layer.style.color,
+                      backgroundColor:
+                        layer.style.backgroundColor || 'transparent',
+                      textAlign: layer.style.textAlign,
+                      fontStyle: layer.style.italic ? 'italic' : 'normal',
+                      textDecoration: layer.style.underline
+                        ? 'underline'
+                        : 'none',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems:
+                        layer.style.textAlign === 'left'
+                          ? 'flex-start'
+                          : layer.style.textAlign === 'right'
+                            ? 'flex-end'
+                            : 'center',
+                      justifyContent:
+                        layer.style.verticalAlign === 'top'
+                          ? 'flex-start'
+                          : layer.style.verticalAlign === 'bottom'
+                            ? 'flex-end'
+                            : 'center',
+                      whiteSpace:
+                        layer.style.wordWrap === 'break-word'
+                          ? 'pre-wrap'
+                          : 'pre',
+                      overflow: 'hidden',
+                      width: '100%',
+                      height: '100%',
+                      userSelect: 'text',
+                      cursor: 'text',
+                      wordBreak:
+                        layer.style.wordWrap === 'break-word'
+                          ? 'break-word'
+                          : 'normal',
+                      wordWrap: layer.style.wordWrap,
+                      pointerEvents: 'auto',
+                      '--text-stroke-width': layer.style.stroke?.enabled
+                        ? `${layer.style.stroke.width}px`
+                        : '0',
+                      '--text-stroke-color': layer.style.stroke?.enabled
+                        ? layer.style.stroke.color
+                        : 'transparent',
+                      WebkitTextStrokeWidth: 'var(--text-stroke-width)',
+                      WebkitTextStrokeColor: 'var(--text-stroke-color)',
+                    } as React.CSSProperties
+                  }
                 >
                   {layer.content}
                 </div>
@@ -796,49 +980,103 @@ export function Canvas({
             ) : (
               // Non-editing view
               <div
-                className="w-full h-full"
+                className='w-full h-full'
                 onClick={(e) => handleLayerClick(e, layer.id)}
                 onMouseDown={(e) => handleMouseDown(e, layer)}
-                style={{
-                  fontFamily: layer.style.fontFamily,
-                  fontSize: layer.style.fontSize,
-                  fontWeight: layer.style.fontWeight,
-                  color: layer.style.color,
-                  backgroundColor: layer.style.backgroundColor || 'transparent',
-                  textAlign: layer.style.textAlign,
-                  fontStyle: layer.style.italic ? 'italic' : 'normal',
-                  textDecoration: layer.style.underline ? 'underline' : 'none',
-                  display: 'flex',
-                  alignItems:
-                    layer.style.verticalAlign === 'top'
-                      ? 'flex-start'
-                      : layer.style.verticalAlign === 'bottom'
-                      ? 'flex-end'
-                      : 'center',
-                  justifyContent:
-                    layer.style.textAlign === 'left'
-                      ? 'flex-start'
-                      : layer.style.textAlign === 'right'
-                      ? 'flex-end'
-                      : 'center',
-                  whiteSpace: layer.style.wordWrap === 'break-word' ? 'pre-wrap' : 'pre',
-                  wordBreak: layer.style.wordWrap === 'break-word' ? 'break-word' : 'normal',
-                  wordWrap: layer.style.wordWrap,
-                  '--text-stroke-width': layer.style.stroke?.enabled ? `${layer.style.stroke.width}px` : '0',
-                  '--text-stroke-color': layer.style.stroke?.enabled ? layer.style.stroke.color : 'transparent',
-                  WebkitTextStrokeWidth: 'var(--text-stroke-width)',
-                  WebkitTextStrokeColor: 'var(--text-stroke-color)',
-                } as React.CSSProperties}
+                style={
+                  {
+                    fontFamily: layer.style.fontFamily,
+                    fontSize: layer.style.fontSize,
+                    fontWeight: layer.style.fontWeight,
+                    color: layer.style.color,
+                    backgroundColor:
+                      layer.style.backgroundColor || 'transparent',
+                    textAlign: layer.style.textAlign,
+                    fontStyle: layer.style.italic ? 'italic' : 'normal',
+                    textDecoration: layer.style.underline
+                      ? 'underline'
+                      : 'none',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems:
+                      layer.style.textAlign === 'left'
+                        ? 'flex-start'
+                        : layer.style.textAlign === 'right'
+                          ? 'flex-end'
+                          : 'center',
+                    justifyContent:
+                      layer.style.verticalAlign === 'top'
+                        ? 'flex-start'
+                        : layer.style.verticalAlign === 'bottom'
+                          ? 'flex-end'
+                          : 'center',
+                    whiteSpace:
+                      layer.style.wordWrap === 'break-word'
+                        ? 'pre-wrap'
+                        : 'pre',
+                    wordBreak:
+                      layer.style.wordWrap === 'break-word'
+                        ? 'break-word'
+                        : 'normal',
+                    wordWrap: layer.style.wordWrap,
+                    '--text-stroke-width': layer.style.stroke?.enabled
+                      ? `${layer.style.stroke.width}px`
+                      : '0',
+                    '--text-stroke-color': layer.style.stroke?.enabled
+                      ? layer.style.stroke.color
+                      : 'transparent',
+                    WebkitTextStrokeWidth: 'var(--text-stroke-width)',
+                    WebkitTextStrokeColor: 'var(--text-stroke-color)',
+                    userSelect: 'none',
+                    pointerEvents: 'auto',
+                    overflow: 'hidden',
+                  } as React.CSSProperties
+                }
               >
-                {layer.content}
+                <div className='w-full'>{layer.content}</div>
               </div>
             )}
-            
-            {/* Selection border and toolbars */}
+
+            {/* Selection border */}
             {selectedLayerId === layer.id && (
               <>
-                <div className="absolute inset-0 border-2 border-dashed border-primary border-opacity-50" />
-                {renderToolbar()}
+                <div className='absolute inset-0 z-selection pointer-events-none'>
+                  <div className='absolute inset-0 bg-selection-pattern animate-border-dance opacity-70' />
+                  <div className='absolute inset-0 border-[3px] border-orange-500/70' />
+                </div>
+                {/* Resize handles */}
+                <div
+                  className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-nw-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                  onMouseDown={(e) => handleResizeStart(e, 'nw')}
+                />
+                <div
+                  className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-ne-resize transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                  onMouseDown={(e) => handleResizeStart(e, 'ne')}
+                />
+                <div
+                  className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-sw-resize transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                  onMouseDown={(e) => handleResizeStart(e, 'sw')}
+                />
+                <div
+                  className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-se-resize transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                  onMouseDown={(e) => handleResizeStart(e, 'se')}
+                />
+                <div
+                  className='absolute top-1/2 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-w-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                  onMouseDown={(e) => handleResizeStart(e, 'w')}
+                />
+                <div
+                  className='absolute top-1/2 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-e-resize transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                  onMouseDown={(e) => handleResizeStart(e, 'e')}
+                />
+                <div
+                  className='absolute -top-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full cursor-n-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                  onMouseDown={(e) => handleResizeStart(e, 'n')}
+                />
+                <div
+                  className='absolute -bottom-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full cursor-s-resize transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
+                  onMouseDown={(e) => handleResizeStart(e, 's')}
+                />
               </>
             )}
           </div>
@@ -847,33 +1085,13 @@ export function Canvas({
     }
   };
 
-  // Handle zooming
-  const handleZoom = (delta: number, clientX?: number, clientY?: number) => {
-    const minZoom = 0.1;
-    const maxZoom = 5;
-    const newZoom = Math.min(Math.max(minZoom, zoom + delta), maxZoom);
-    
-    if (clientX !== undefined && clientY !== undefined && canvasRef.current) {
-      // Get the canvas rect
-      const rect = canvasRef.current.getBoundingClientRect();
-      
-      // Calculate the point on the canvas where we're zooming
-      const x = (clientX - rect.left) / zoom;
-      const y = (clientY - rect.top) / zoom;
-      
-      // Calculate new offsets to keep the zoom point stationary
-      const newOffsetX = x * (zoom - newZoom);
-      const newOffsetY = y * (zoom - newZoom);
-      
-      // Update viewport offset to maintain zoom point
-      setViewportOffset(prev => ({
-        x: prev.x + newOffsetX,
-        y: prev.y + newOffsetY,
-      }));
-    }
-    
-    setZoom(newZoom);
-  };
+  // Sort layers for rendering
+  const sortedLayers = layerData
+    .sort((a, b) => compareLayersForRender(a, b, layers))
+    .map((layer) => ({
+      ...layer,
+      zIndex: (layers.find((l) => l.id === layer.id)?.index ?? 0) * 10,
+    }));
 
   // Handle wheel events for trackpad gestures
   const handleWheel = (e: WheelEvent) => {
@@ -884,18 +1102,18 @@ export function Canvas({
       if (!rect) return;
 
       const delta = -e.deltaY * 0.001; // Adjust sensitivity
-      handleZoom(delta, e.clientX, e.clientY);
+      handleZoom(delta);
     } else if (e.shiftKey) {
       // Horizontal scroll with shift
       e.preventDefault();
-      setViewportOffset(prev => ({
+      setViewportOffset((prev) => ({
         x: prev.x - e.deltaY,
         y: prev.y,
       }));
     } else {
       // Normal scroll
       e.preventDefault();
-      setViewportOffset(prev => ({
+      setViewportOffset((prev) => ({
         x: prev.x - e.deltaX,
         y: prev.y - e.deltaY,
       }));
@@ -919,9 +1137,9 @@ export function Canvas({
     if (e.button !== 1 && !isPanning) return;
     e.preventDefault();
     setIsPanning(true);
-    setPanStart({ 
-      x: e.clientX - viewportOffset.x, 
-      y: e.clientY - viewportOffset.y 
+    setPanStart({
+      x: e.clientX - viewportOffset.x,
+      y: e.clientY - viewportOffset.y,
     });
   };
 
@@ -929,7 +1147,7 @@ export function Canvas({
     if (!isPanning) return;
     const newX = e.clientX - panStart.x;
     const newY = e.clientY - panStart.y;
-    
+
     // Add bounds to prevent panning too far
     const workspace = workspaceRef.current;
     const canvas = canvasRef.current;
@@ -937,7 +1155,7 @@ export function Canvas({
 
     const workspaceRect = workspace.getBoundingClientRect();
     const canvasRect = canvas.getBoundingClientRect();
-    
+
     // Calculate bounds with some padding
     const padding = 100;
     const minX = workspaceRect.width - canvasRect.width * zoom - padding;
@@ -955,33 +1173,10 @@ export function Canvas({
     setIsPanning(false);
   };
 
-  // Handle resize
-  const handleResizeStart = (
-    e: React.MouseEvent<HTMLDivElement>, 
-    handle: 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
-  ) => {
-    if (!selectedLayerId) return;
-    
-    e.stopPropagation();
-    e.preventDefault();
-    
-    const layer = layerData.find(l => l.id === selectedLayerId);
-    if (!layer) return;
-
-    setIsResizing(true);
-    setResizeHandle(handle);
-    setResizeStart({
-      x: e.clientX,
-      y: e.clientY,
-      width: layer.transform.width,
-      height: layer.transform.height,
-    });
-  };
-
   const handleResizeMove = (e: MouseEvent | React.MouseEvent) => {
     if (!isResizing || !resizeHandle || !selectedLayerId) return;
 
-    const layer = layerData.find(l => l.id === selectedLayerId);
+    const layer = layerData.find((l) => l.id === selectedLayerId);
     if (!layer) return;
 
     const deltaX = (e.clientX - resizeStart.x) / zoom;
@@ -991,42 +1186,83 @@ export function Canvas({
     let newX = layer.transform.x;
     let newY = layer.transform.y;
 
+    // Always maintain aspect ratio for image and sticker layers
+    const shouldMaintainAspectRatio =
+      layer.type === 'image' ||
+      layer.type === 'sticker' ||
+      (e instanceof MouseEvent && e.shiftKey);
+    const aspectRatio = resizeStart.width / resizeStart.height;
+
     // Handle different resize directions
     if (resizeHandle.includes('e')) {
       newWidth = Math.max(50, resizeStart.width + deltaX);
+      if (shouldMaintainAspectRatio) {
+        newHeight = newWidth / aspectRatio;
+      }
     }
     if (resizeHandle.includes('w')) {
       const width = Math.max(50, resizeStart.width - deltaX);
       newX = layer.transform.x + (resizeStart.width - width);
       newWidth = width;
+      if (shouldMaintainAspectRatio) {
+        newHeight = newWidth / aspectRatio;
+        // Adjust Y to maintain center point
+        const heightDiff = resizeStart.height - newHeight;
+        newY = layer.transform.y + heightDiff / 2;
+      }
     }
     if (resizeHandle.includes('s')) {
       newHeight = Math.max(50, resizeStart.height + deltaY);
+      if (shouldMaintainAspectRatio) {
+        newWidth = newHeight * aspectRatio;
+      }
     }
     if (resizeHandle.includes('n')) {
       const height = Math.max(50, resizeStart.height - deltaY);
       newY = layer.transform.y + (resizeStart.height - height);
       newHeight = height;
+      if (shouldMaintainAspectRatio) {
+        newWidth = newHeight * aspectRatio;
+        // Adjust X to maintain center point
+        const widthDiff = resizeStart.width - newWidth;
+        newX = layer.transform.x + widthDiff / 2;
+      }
+    }
+
+    // For corner handles
+    if (resizeHandle.length === 2) {
+      if (shouldMaintainAspectRatio) {
+        // Use the larger delta to determine the scaling
+        if (Math.abs(deltaX) > Math.abs(deltaY)) {
+          newHeight = newWidth / aspectRatio;
+        } else {
+          newWidth = newHeight * aspectRatio;
+        }
+      }
     }
 
     // Update layer with new dimensions
-    setLayerData(prev => 
-      prev.map(l => l.id === selectedLayerId ? {
-        ...l,
-        transform: {
-          ...l.transform,
-          x: newX,
-          y: newY,
-          width: newWidth,
-          height: newHeight,
-        },
-      } : l)
+    setLayerData((prev) =>
+      prev.map((l) =>
+        l.id === selectedLayerId
+          ? {
+              ...l,
+              transform: {
+                ...l.transform,
+                x: newX,
+                y: newY,
+                width: newWidth,
+                height: newHeight,
+              },
+            }
+          : l
+      )
     );
   };
 
   const handleResizeEnd = () => {
     if (isResizing && selectedLayerId) {
-      const layer = layerData.find(l => l.id === selectedLayerId);
+      const layer = layerData.find((l) => l.id === selectedLayerId);
       if (layer) {
         onLayerUpdate(layer);
       }
@@ -1050,12 +1286,12 @@ export function Canvas({
 
   // Handle canvas resize
   const handleCanvasResizeStart = (
-    e: React.MouseEvent<HTMLDivElement>, 
+    e: React.MouseEvent<HTMLDivElement>,
     handle: 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
   ) => {
     e.stopPropagation();
     e.preventDefault();
-    
+
     setIsCanvasResizing(true);
     setCanvasResizeHandle(handle);
     setCanvasResizeStart({
@@ -1081,27 +1317,43 @@ export function Canvas({
 
     // Handle different resize directions
     if (canvasResizeHandle.includes('e')) {
-      newWidth = Math.min(MAX_SIZE, Math.max(MIN_SIZE, canvasResizeStart.width + deltaX));
+      newWidth = Math.min(
+        MAX_SIZE,
+        Math.max(MIN_SIZE, canvasResizeStart.width + deltaX)
+      );
     } else if (canvasResizeHandle.includes('w')) {
       const widthDelta = deltaX;
-      newWidth = Math.min(MAX_SIZE, Math.max(MIN_SIZE, canvasResizeStart.width - widthDelta));
+      newWidth = Math.min(
+        MAX_SIZE,
+        Math.max(MIN_SIZE, canvasResizeStart.width - widthDelta)
+      );
       if (newWidth !== canvasResizeStart.width) {
         newX = viewportOffset.x + (canvasResizeStart.width - newWidth) * zoom;
       }
     }
 
     if (canvasResizeHandle.includes('s')) {
-      newHeight = Math.min(MAX_SIZE, Math.max(MIN_SIZE, canvasResizeStart.height + deltaY));
+      newHeight = Math.min(
+        MAX_SIZE,
+        Math.max(MIN_SIZE, canvasResizeStart.height + deltaY)
+      );
     } else if (canvasResizeHandle.includes('n')) {
       const heightDelta = deltaY;
-      newHeight = Math.min(MAX_SIZE, Math.max(MIN_SIZE, canvasResizeStart.height - heightDelta));
+      newHeight = Math.min(
+        MAX_SIZE,
+        Math.max(MIN_SIZE, canvasResizeStart.height - heightDelta)
+      );
       if (newHeight !== canvasResizeStart.height) {
         newY = viewportOffset.y + (canvasResizeStart.height - newHeight) * zoom;
       }
     }
 
     // For corner handles, maintain aspect ratio if shift is held
-    if (canvasResizeHandle.length === 2 && e instanceof MouseEvent && e.shiftKey) {
+    if (
+      canvasResizeHandle.length === 2 &&
+      e instanceof MouseEvent &&
+      e.shiftKey
+    ) {
       const aspectRatio = canvasResizeStart.width / canvasResizeStart.height;
       if (Math.abs(deltaX) > Math.abs(deltaY)) {
         newHeight = newWidth / aspectRatio;
@@ -1114,26 +1366,44 @@ export function Canvas({
     newWidth = Math.round(Math.min(MAX_SIZE, Math.max(MIN_SIZE, newWidth)));
     newHeight = Math.round(Math.min(MAX_SIZE, Math.max(MIN_SIZE, newHeight)));
 
+    // Update canvas size without affecting zoom or centering
     setCanvasSize({
       width: newWidth,
       height: newHeight,
     });
 
-    setViewportOffset({
-      x: newX,
-      y: newY,
-    });
+    // Update viewport offset only if necessary (when resizing from left or top)
+    if (canvasResizeHandle.includes('w') || canvasResizeHandle.includes('n')) {
+      setViewportOffset({
+        x: newX,
+        y: newY,
+      });
+    }
   };
 
   const handleCanvasResizeEnd = async () => {
     if (isCanvasResizing) {
       try {
+        // Round the dimensions to whole numbers
+        const width = Math.round(canvasSize.width);
+        const height = Math.round(canvasSize.height);
+
+        // Update the database directly
         await updateCanvasSettings(projectId, {
-          width: Math.round(canvasSize.width),
-          height: Math.round(canvasSize.height),
+          width,
+          height,
         });
+
+        // Update local state with rounded values
+        setCanvasSize({
+          width,
+          height,
+        });
+
+        console.log('Canvas size updated:', { width, height });
       } catch (error) {
-        console.error("Failed to update canvas settings:", error);
+        console.error('Failed to update canvas settings:', error);
+        toast.error('Failed to save canvas size');
       }
     }
     setIsCanvasResizing(false);
@@ -1184,24 +1454,42 @@ export function Canvas({
     return () => window.removeEventListener('keydown', handleKeyboardShortcuts);
   }, [zoom]);
 
-  const compareLayersForRender = (a: Layer, b: Layer) => {
-    const aIndex = layers.find(l => l.id === a.id)?.index ?? 0;
-    const bIndex = layers.find(l => l.id === b.id)?.index ?? 0;
-    console.log('Comparing layers for render:', {
-      a: { id: a.id, type: a.type, index: aIndex },
-      b: { id: b.id, type: b.type, index: bIndex },
-      result: aIndex - bIndex
-    });
-    return aIndex - bIndex;
-  };
+  // Add this effect after the other useEffects
+  useEffect(() => {
+    const loadLayers = async () => {
+      try {
+        const layers = await getProjectLayers(projectId);
+        setLayerData(layers);
+      } catch (error) {
+        console.error('Failed to load layers:', error);
+        toast.error('Failed to load layers');
+      }
+    };
+
+    loadLayers();
+  }, [projectId, canvasSettingsVersion, layers]); // Add layers as a dependency
 
   return (
-    <div className={cn("relative overflow-hidden bg-neutral-900", className)}>
+    <div className={cn('relative overflow-hidden bg-neutral-900', className)}>
       {/* Infinite scrollable workspace */}
       <div
         ref={workspaceRef}
-        className="absolute inset-0 overflow-auto"
+        className='absolute inset-0 overflow-auto'
         onMouseDown={(e) => {
+          // Close toolbars when clicking anywhere in workspace, except on layers, toolbars, or image controls
+          const target = e.target as HTMLElement;
+          if (
+            !target.closest('.layer') &&
+            !target.closest('.toolbar') &&
+            !target.closest('.image-toolbar') &&
+            !target.closest('[data-ignore-blur]')
+          ) {
+            onLayerSelect(null);
+            setEditingTextId(null);
+            setIsEraserMode(false);
+            setEraserPath([]);
+          }
+
           if (!isResizing && !isDragging && !isCanvasResizing) {
             handlePanStart(e);
           }
@@ -1225,18 +1513,17 @@ export function Canvas({
           handleResizeEnd();
           handleCanvasResizeEnd();
         }}
-        onClick={handleCanvasClick}
       >
-        <div 
-          className="relative"
-          style={{ 
+        <div
+          className='relative'
+          style={{
             width: `${Math.round(workspaceRef.current?.clientWidth || 0)}px`,
             height: `${Math.round(workspaceRef.current?.clientHeight || 0)}px`,
           }}
         >
           {/* Canvas container */}
-          <div 
-            className="absolute"
+          <div
+            className='absolute'
             style={{
               left: `${Math.round(viewportOffset.x)}px`,
               top: `${Math.round(viewportOffset.y)}px`,
@@ -1247,93 +1534,104 @@ export function Canvas({
             {/* Official canvas area */}
             <div
               ref={canvasRef}
-              className="absolute bg-background shadow-2xl rounded-lg overflow-hidden border border-border/20"
+              className='absolute bg-background shadow-2xl rounded-lg'
               style={{
                 width: `${Math.round(canvasSize.width)}px`,
                 height: `${Math.round(canvasSize.height)}px`,
                 transform: `scale(${Number(zoom.toFixed(3))})`,
-                transformOrigin: "0 0",
+                transformOrigin: '0 0',
+                ...(canvasBackground.type === 'color' && {
+                  backgroundColor: canvasBackground.color,
+                }),
+                ...(canvasBackground.type === 'image' &&
+                  canvasBackground.imageSize && {
+                    backgroundImage: `url(${canvasBackground.imageUrl})`,
+                    backgroundSize: (() => {
+                      const scaled = calculateScaledDimensions(
+                        canvasBackground.imageSize.width,
+                        canvasBackground.imageSize.height,
+                        canvasSize.width,
+                        canvasSize.height
+                      );
+                      return `${Math.round(scaled.width)}px ${Math.round(scaled.height)}px`;
+                    })(),
+                    backgroundPosition: 'center',
+                    backgroundRepeat: 'no-repeat',
+                    willChange: 'transform',
+                    backfaceVisibility: 'hidden',
+                    WebkitBackfaceVisibility: 'hidden',
+                  }),
               }}
             >
               {/* Canvas grid background */}
-              <div 
-                className="absolute inset-0 pointer-events-none opacity-5"
+              <div
+                className={cn(
+                  'absolute inset-0 pointer-events-none opacity-5',
+                  canvasBackground.type === 'image' && 'mix-blend-difference'
+                )}
                 style={{
                   backgroundImage: `
                     linear-gradient(to right, gray 1px, transparent 1px),
                     linear-gradient(to bottom, gray 1px, transparent 1px)
                   `,
-                  backgroundSize: '20px 20px'
+                  backgroundSize: '20px 20px',
+                  overflow: 'clip',
                 }}
               />
 
-              {/* Render layers */}
-              {layerData
-                .sort(compareLayersForRender)
-                .map(layer => {
-                  const layerIndex = layers.find(l => l.id === layer.id)?.index ?? 0;
-                  console.log('Rendering layer:', {
-                    id: layer.id,
-                    type: layer.type,
-                    index: layerIndex,
-                    zIndex: layerIndex * 10 // Use multiplier to leave room between indices
-                  });
-                  return renderLayer(layer);
-                })}
-              
+              {/* Container for layers that allows overflow */}
+              <div className='absolute inset-0' style={{ overflow: 'visible' }}>
+                {/* Render layers */}
+                {sortedLayers.map((layer) => renderLayer(layer))}
+              </div>
+
               {/* Eraser path overlay */}
               {isEraserMode && eraserPath.length > 0 && (
-                <svg className="absolute inset-0 pointer-events-none">
+                <svg className='absolute inset-0 pointer-events-none'>
                   <path
                     d={`M ${eraserPath[0][0]} ${eraserPath[0][1]} ${eraserPath
                       .slice(1)
                       .map(([x, y]) => `L ${x} ${y}`)
                       .join(' ')}`}
-                    stroke="black"
-                    strokeWidth="2"
-                    fill="none"
+                    stroke='black'
+                    strokeWidth='2'
+                    fill='none'
                   />
                 </svg>
               )}
+
+              {/* High z-index canvas boundary indicator */}
+              <div
+                className='absolute inset-0 pointer-events-none border-2 border-primary'
+                style={{
+                  zIndex: 9998,
+                  boxShadow: '0 0 0 1px rgba(0, 0, 0, 0.1)',
+                }}
+              />
             </div>
 
             {/* Canvas resize handles */}
             {showCanvasResizeHandles && (
-              <div className="absolute inset-0 pointer-events-none">
+              <div
+                className='absolute inset-0 pointer-events-none'
+                style={{ zIndex: 20 }}
+              >
                 {/* Corner handles */}
                 <div
-                  className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-primary rounded-full cursor-nw-resize pointer-events-auto ring-2 ring-background"
+                  className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-primary rounded-full cursor-nw-resize pointer-events-auto ring-2 ring-background'
                   onMouseDown={(e) => handleCanvasResizeStart(e, 'nw')}
                 />
                 <div
-                  className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-primary rounded-full cursor-ne-resize pointer-events-auto ring-2 ring-background"
+                  className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-primary rounded-full cursor-ne-resize pointer-events-auto ring-2 ring-background'
                   onMouseDown={(e) => handleCanvasResizeStart(e, 'ne')}
                 />
                 <div
-                  className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-primary rounded-full cursor-sw-resize pointer-events-auto ring-2 ring-background"
+                  className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-primary rounded-full cursor-sw-resize pointer-events-auto ring-2 ring-background'
                   onMouseDown={(e) => handleCanvasResizeStart(e, 'sw')}
                 />
                 <div
-                  className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-primary rounded-full cursor-se-resize pointer-events-auto ring-2 ring-background"
+                  className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-primary rounded-full cursor-se-resize pointer-events-auto ring-2 ring-background'
                   onMouseDown={(e) => handleCanvasResizeStart(e, 'se')}
-                />
-
-                {/* Edge handles */}
-                <div
-                  className="absolute -top-1.5 left-1/2 w-3 h-3 bg-primary rounded-full cursor-n-resize -translate-x-1/2 pointer-events-auto ring-2 ring-background"
-                  onMouseDown={(e) => handleCanvasResizeStart(e, 'n')}
-                />
-                <div
-                  className="absolute -bottom-1.5 left-1/2 w-3 h-3 bg-primary rounded-full cursor-s-resize -translate-x-1/2 pointer-events-auto ring-2 ring-background"
-                  onMouseDown={(e) => handleCanvasResizeStart(e, 's')}
-                />
-                <div
-                  className="absolute -left-1.5 top-1/2 w-3 h-3 bg-primary rounded-full cursor-w-resize -translate-y-1/2 pointer-events-auto ring-2 ring-background"
-                  onMouseDown={(e) => handleCanvasResizeStart(e, 'w')}
-                />
-                <div
-                  className="absolute -right-1.5 top-1/2 w-3 h-3 bg-primary rounded-full cursor-e-resize -translate-y-1/2 pointer-events-auto ring-2 ring-background"
-                  onMouseDown={(e) => handleCanvasResizeStart(e, 'e')}
                 />
               </div>
             )}
@@ -1342,45 +1640,44 @@ export function Canvas({
       </div>
 
       {/* Zoom controls */}
-      <div className="absolute bottom-4 right-4 flex flex-col gap-2">
+      <div className='absolute bottom-4 right-4 flex flex-col gap-2'>
         <Button
-          variant="secondary"
-          size="icon"
+          variant='secondary'
+          size='icon'
           onClick={() => handleZoom(0.1)}
-          className="rounded-full bg-background/80 backdrop-blur-sm shadow-lg hover:bg-accent"
+          className='rounded-full bg-background/80 backdrop-blur-sm shadow-lg hover:bg-accent'
         >
-          <ZoomIn className="h-4 w-4" />
+          <ZoomIn className='h-4 w-4' />
         </Button>
         <Button
-          variant="secondary"
-          size="icon"
+          variant='secondary'
+          size='icon'
           onClick={() => handleZoom(-0.1)}
-          className="rounded-full bg-background/80 backdrop-blur-sm shadow-lg hover:bg-accent"
+          className='rounded-full bg-background/80 backdrop-blur-sm shadow-lg hover:bg-accent'
         >
-          <ZoomOut className="h-4 w-4" />
+          <ZoomOut className='h-4 w-4' />
         </Button>
         <Button
-          variant="secondary"
-          size="icon"
+          variant='secondary'
+          size='icon'
           onClick={() => {
             centerAndFitCanvas();
-            // Only toggle panning if it's not already active
             if (isPanning) {
               setIsPanning(false);
             }
           }}
           className={cn(
-            "rounded-full bg-background/80 backdrop-blur-sm shadow-lg hover:bg-accent",
-            isPanning && "bg-accent text-accent-foreground"
+            'rounded-full bg-background/80 backdrop-blur-sm shadow-lg hover:bg-accent',
+            isPanning && 'bg-accent text-accent-foreground'
           )}
-          title="Center Canvas (Ctrl/Cmd + 0)"
+          title='Center Canvas (Ctrl/Cmd + 0)'
         >
-          <Move className="h-4 w-4" />
+          <Move className='h-4 w-4' />
         </Button>
       </div>
 
       {/* Canvas dimensions display */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-2 py-1 rounded bg-background/80 backdrop-blur-sm text-xs text-muted-foreground">
+      <div className='absolute bottom-4 left-1/2 -translate-x-1/2 px-2 py-1 rounded bg-background/80 backdrop-blur-sm text-xs text-muted-foreground'>
         {canvasSize.width} × {canvasSize.height}
       </div>
     </div>
