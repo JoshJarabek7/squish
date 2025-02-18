@@ -137,6 +137,12 @@ export default function Playground() {
     [key: string]: { url: string; loading: boolean; error: boolean };
   }>({});
   const [canvasSettingsVersion, setCanvasSettingsVersion] = useState(0);
+  const [gridSettings, setGridSettings] = useState({
+    enabled: true,
+    columns: 3,
+    rows: 3,
+    showFractions: true,
+  });
 
   // Add a ref to track if we're currently deleting a project
   const isDeletingProject = useRef(false);
@@ -1226,6 +1232,8 @@ export default function Playground() {
                       onLayerDelete={handleLayerDelete}
                       onLayerDuplicate={handleLayerDuplicate}
                       canvasBackground={canvasBackground}
+                      gridSettings={gridSettings}
+                      onGridSettingsChange={setGridSettings}
                     />
                   </div>
                   <Canvas
@@ -1245,6 +1253,7 @@ export default function Playground() {
                     onBackgroundChange={handleBackgroundChange}
                     zoom={zoom}
                     onZoomChange={handleZoomChange}
+                    gridSettings={gridSettings}
                   />
                 </div>
 

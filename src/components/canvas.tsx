@@ -44,6 +44,12 @@ interface CanvasProps {
   }) => void;
   zoom?: number;
   onZoomChange?: (zoom: number) => void;
+  gridSettings: {
+    enabled: boolean;
+    columns: number;
+    rows: number;
+    showFractions: boolean;
+  };
 }
 
 interface AssetCache {
@@ -54,12 +60,20 @@ interface AssetCache {
   };
 }
 
+interface AlignmentGuide {
+  position: number;
+  type: 'horizontal' | 'vertical';
+  layerId?: string;
+  guideType: 'edge' | 'center' | 'size' | 'grid' | 'fraction' | 'background';
+}
+
 export function Canvas({
   projectId,
   layers,
   selectedLayerId,
   onLayerSelect,
   onLayerUpdate,
+  onLayerDelete,
   showCanvasResizeHandles = true,
   className,
   onAssetDataChange,
@@ -68,6 +82,7 @@ export function Canvas({
   onBackgroundChange,
   zoom: externalZoom,
   onZoomChange,
+  gridSettings,
 }: CanvasProps) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -105,6 +120,10 @@ export function Canvas({
     'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null
   >(null);
   const hasInitialCentered = useRef(false);
+  const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuide[]>([]);
+  const SNAP_THRESHOLD = 5; // Pixels within which to snap
+  const [isRotating, setIsRotating] = useState(false);
+  const [rotationStart, setRotationStart] = useState({ x: 0, y: 0, angle: 0 });
 
   // Use either external or internal zoom
   const zoom = externalZoom ?? internalZoom;
@@ -477,8 +496,70 @@ export function Canvas({
       const mouseX = (e.clientX - canvasRect.left) / zoom;
       const mouseY = (e.clientY - canvasRect.top) / zoom;
 
-      const newX = mouseX - dragStart.x;
-      const newY = mouseY - dragStart.y;
+      let newX = mouseX - dragStart.x;
+      let newY = mouseY - dragStart.y;
+
+      // Calculate potential guides for the current layer
+      const guides = calculateAlignmentGuides(
+        {
+          ...dragLayer,
+          transform: { ...dragLayer.transform, x: newX, y: newY },
+        },
+        dragLayer.id
+      );
+
+      // Find closest guides
+      const leftGuide = findClosestGuide(newX, guides, 'vertical');
+      const rightGuide = findClosestGuide(
+        newX + dragLayer.transform.width,
+        guides,
+        'vertical'
+      );
+      const centerXGuide = findClosestGuide(
+        newX + dragLayer.transform.width / 2,
+        guides,
+        'vertical'
+      );
+      const topGuide = findClosestGuide(newY, guides, 'horizontal');
+      const bottomGuide = findClosestGuide(
+        newY + dragLayer.transform.height,
+        guides,
+        'horizontal'
+      );
+      const centerYGuide = findClosestGuide(
+        newY + dragLayer.transform.height / 2,
+        guides,
+        'horizontal'
+      );
+
+      // Apply snapping
+      if (leftGuide) {
+        newX = leftGuide.guide.position;
+      } else if (rightGuide) {
+        newX = rightGuide.guide.position - dragLayer.transform.width;
+      } else if (centerXGuide) {
+        newX = centerXGuide.guide.position - dragLayer.transform.width / 2;
+      }
+
+      if (topGuide) {
+        newY = topGuide.guide.position;
+      } else if (bottomGuide) {
+        newY = bottomGuide.guide.position - dragLayer.transform.height;
+      } else if (centerYGuide) {
+        newY = centerYGuide.guide.position - dragLayer.transform.height / 2;
+      }
+
+      // Update alignment guides
+      setAlignmentGuides(
+        [
+          leftGuide?.guide,
+          rightGuide?.guide,
+          centerXGuide?.guide,
+          topGuide?.guide,
+          bottomGuide?.guide,
+          centerYGuide?.guide,
+        ].filter((guide): guide is AlignmentGuide => guide !== undefined)
+      );
 
       // Update local state immediately for smooth dragging
       setLayerData((prev) =>
@@ -509,6 +590,7 @@ export function Canvas({
 
       setIsDragging(false);
       setDragLayer(null);
+      setAlignmentGuides([]); // Clear guides when done dragging
     };
 
     window.addEventListener('mousemove', handleMouseMove);
@@ -527,6 +609,16 @@ export function Canvas({
     const handleKeyDown = (e: KeyboardEvent) => {
       const layer = layerData.find((l) => l.id === selectedLayerId);
       if (!layer) return;
+
+      // Don't handle delete if we're editing text
+      if (editingTextId === layer.id) return;
+
+      // Handle delete key
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        void onLayerDelete(layer.id);
+        return;
+      }
 
       const MOVE_AMOUNT = 1;
       const ROTATE_AMOUNT = 1;
@@ -586,7 +678,7 @@ export function Canvas({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedLayerId, layerData, onLayerUpdate]);
+  }, [selectedLayerId, layerData, onLayerUpdate, editingTextId, onLayerDelete]);
 
   const handleTextDoubleClick = (e: React.MouseEvent, layer: Layer) => {
     if (layer.type !== 'text') return;
@@ -683,6 +775,457 @@ export function Canvas({
     return { width: scaledWidth, height: scaledHeight, x, y };
   };
 
+  const handleResizeEnd = () => {
+    if (isResizing && selectedLayerId) {
+      const layer = layerData.find((l) => l.id === selectedLayerId);
+      if (layer) {
+        onLayerUpdate(layer);
+      }
+    }
+    setIsResizing(false);
+    setResizeHandle(null);
+    setAlignmentGuides([]); // Clear guides when done resizing
+  };
+
+  // Calculate alignment guides for a layer
+  const calculateAlignmentGuides = (
+    activeLayer: Layer,
+    skipLayerId?: string
+  ): AlignmentGuide[] => {
+    const guides: AlignmentGuide[] = [];
+    const activeLeft = activeLayer.transform.x;
+    const activeRight = activeLayer.transform.x + activeLayer.transform.width;
+    const activeTop = activeLayer.transform.y;
+    const activeBottom = activeLayer.transform.y + activeLayer.transform.height;
+    const activeCenterX = activeLeft + activeLayer.transform.width / 2;
+    const activeCenterY = activeTop + activeLayer.transform.height / 2;
+    const activeWidth = activeLayer.transform.width;
+    const activeHeight = activeLayer.transform.height;
+
+    // Add canvas edge guides
+    guides.push(
+      { position: 0, type: 'vertical', guideType: 'edge' }, // Left edge
+      { position: canvasSize.width, type: 'vertical', guideType: 'edge' }, // Right edge
+      { position: 0, type: 'horizontal', guideType: 'edge' }, // Top edge
+      { position: canvasSize.height, type: 'horizontal', guideType: 'edge' } // Bottom edge
+    );
+
+    // Add canvas center guides
+    guides.push(
+      { position: canvasSize.width / 2, type: 'vertical', guideType: 'center' },
+      {
+        position: canvasSize.height / 2,
+        type: 'horizontal',
+        guideType: 'center',
+      }
+    );
+
+    // Add grid guides if enabled
+    if (gridSettings.enabled) {
+      // Column guides
+      const columnWidth = canvasSize.width / gridSettings.columns;
+      for (let i = 1; i < gridSettings.columns; i++) {
+        guides.push({
+          position: columnWidth * i,
+          type: 'vertical',
+          guideType: 'grid',
+        });
+      }
+
+      // Row guides
+      const rowHeight = canvasSize.height / gridSettings.rows;
+      for (let i = 1; i < gridSettings.rows; i++) {
+        guides.push({
+          position: rowHeight * i,
+          type: 'horizontal',
+          guideType: 'grid',
+        });
+      }
+
+      // Add fractional guides if enabled
+      if (gridSettings.showFractions) {
+        // Add thirds
+        [1 / 3, 2 / 3].forEach((fraction) => {
+          guides.push(
+            {
+              position: canvasSize.width * fraction,
+              type: 'vertical',
+              guideType: 'fraction',
+            },
+            {
+              position: canvasSize.height * fraction,
+              type: 'horizontal',
+              guideType: 'fraction',
+            }
+          );
+        });
+
+        // Add quarters
+        [1 / 4, 3 / 4].forEach((fraction) => {
+          guides.push(
+            {
+              position: canvasSize.width * fraction,
+              type: 'vertical',
+              guideType: 'fraction',
+            },
+            {
+              position: canvasSize.height * fraction,
+              type: 'horizontal',
+              guideType: 'fraction',
+            }
+          );
+        });
+      }
+    }
+
+    // Compare with background image if present
+    if (canvasBackground.type === 'image' && canvasBackground.imageSize) {
+      const scaled = calculateScaledDimensions(
+        canvasBackground.imageSize.width,
+        canvasBackground.imageSize.height,
+        canvasSize.width,
+        canvasSize.height
+      );
+
+      // Add background image edges
+      guides.push(
+        { position: scaled.x, type: 'vertical', guideType: 'background' },
+        {
+          position: scaled.x + scaled.width,
+          type: 'vertical',
+          guideType: 'background',
+        },
+        { position: scaled.y, type: 'horizontal', guideType: 'background' },
+        {
+          position: scaled.y + scaled.height,
+          type: 'horizontal',
+          guideType: 'background',
+        }
+      );
+
+      // Add background image center
+      guides.push(
+        {
+          position: scaled.x + scaled.width / 2,
+          type: 'vertical',
+          guideType: 'background',
+        },
+        {
+          position: scaled.y + scaled.height / 2,
+          type: 'horizontal',
+          guideType: 'background',
+        }
+      );
+    }
+
+    // Compare with other layers
+    layerData.forEach((otherLayer) => {
+      if (otherLayer.id === skipLayerId) return;
+
+      const left = otherLayer.transform.x;
+      const right = otherLayer.transform.x + otherLayer.transform.width;
+      const top = otherLayer.transform.y;
+      const bottom = otherLayer.transform.y + otherLayer.transform.height;
+      const centerX = left + otherLayer.transform.width / 2;
+      const centerY = top + otherLayer.transform.height / 2;
+      const width = otherLayer.transform.width;
+      const height = otherLayer.transform.height;
+
+      // Add guides for aligning centers with other layer's edges
+      if (Math.abs(activeCenterX - left) < SNAP_THRESHOLD) {
+        guides.push({
+          position: left,
+          type: 'vertical',
+          layerId: otherLayer.id,
+          guideType: 'center',
+        });
+      }
+      if (Math.abs(activeCenterX - right) < SNAP_THRESHOLD) {
+        guides.push({
+          position: right,
+          type: 'vertical',
+          layerId: otherLayer.id,
+          guideType: 'center',
+        });
+      }
+      if (Math.abs(activeCenterY - top) < SNAP_THRESHOLD) {
+        guides.push({
+          position: top,
+          type: 'horizontal',
+          layerId: otherLayer.id,
+          guideType: 'center',
+        });
+      }
+      if (Math.abs(activeCenterY - bottom) < SNAP_THRESHOLD) {
+        guides.push({
+          position: bottom,
+          type: 'horizontal',
+          layerId: otherLayer.id,
+          guideType: 'center',
+        });
+      }
+
+      // Add guides for aligning edges with other layer's centers
+      if (Math.abs(activeLeft - centerX) < SNAP_THRESHOLD) {
+        guides.push({
+          position: centerX,
+          type: 'vertical',
+          layerId: otherLayer.id,
+          guideType: 'center',
+        });
+      }
+      if (Math.abs(activeRight - centerX) < SNAP_THRESHOLD) {
+        guides.push({
+          position: centerX,
+          type: 'vertical',
+          layerId: otherLayer.id,
+          guideType: 'center',
+        });
+      }
+      if (Math.abs(activeTop - centerY) < SNAP_THRESHOLD) {
+        guides.push({
+          position: centerY,
+          type: 'horizontal',
+          layerId: otherLayer.id,
+          guideType: 'center',
+        });
+      }
+      if (Math.abs(activeBottom - centerY) < SNAP_THRESHOLD) {
+        guides.push({
+          position: centerY,
+          type: 'horizontal',
+          layerId: otherLayer.id,
+          guideType: 'center',
+        });
+      }
+
+      // Add guides for aligning edges
+      guides.push(
+        {
+          position: left,
+          type: 'vertical',
+          layerId: otherLayer.id,
+          guideType: 'edge',
+        },
+        {
+          position: right,
+          type: 'vertical',
+          layerId: otherLayer.id,
+          guideType: 'edge',
+        },
+        {
+          position: centerX,
+          type: 'vertical',
+          layerId: otherLayer.id,
+          guideType: 'center',
+        },
+        {
+          position: top,
+          type: 'horizontal',
+          layerId: otherLayer.id,
+          guideType: 'edge',
+        },
+        {
+          position: bottom,
+          type: 'horizontal',
+          layerId: otherLayer.id,
+          guideType: 'edge',
+        },
+        {
+          position: centerY,
+          type: 'horizontal',
+          layerId: otherLayer.id,
+          guideType: 'center',
+        }
+      );
+
+      // Size guides (only if within threshold)
+      if (Math.abs(width - activeWidth) < SNAP_THRESHOLD) {
+        guides.push({
+          position: width,
+          type: 'vertical',
+          layerId: otherLayer.id,
+          guideType: 'size',
+        });
+      }
+      if (Math.abs(height - activeHeight) < SNAP_THRESHOLD) {
+        guides.push({
+          position: height,
+          type: 'horizontal',
+          layerId: otherLayer.id,
+          guideType: 'size',
+        });
+      }
+    });
+
+    return guides;
+  };
+
+  // Find the closest guide within threshold
+  const findClosestGuide = (
+    value: number,
+    guides: AlignmentGuide[],
+    type: 'horizontal' | 'vertical'
+  ): { guide: AlignmentGuide; distance: number } | null => {
+    let closestGuide = null;
+    let minDistance = SNAP_THRESHOLD;
+
+    guides
+      .filter((g) => g.type === type)
+      .forEach((guide) => {
+        const distance = Math.abs(guide.position - value);
+        if (distance < minDistance) {
+          minDistance = distance;
+          closestGuide = guide;
+        }
+      });
+
+    return closestGuide ? { guide: closestGuide, distance: minDistance } : null;
+  };
+
+  // Update the renderAlignmentGuides function to handle different guide types
+  const renderAlignmentGuides = () => {
+    return alignmentGuides.map((guide, index) => {
+      const style = {
+        position: 'absolute' as const,
+        backgroundColor: (() => {
+          switch (guide.guideType) {
+            case 'size':
+              return '#00ff00';
+            case 'grid':
+              return 'rgba(128, 128, 255, 0.5)';
+            case 'fraction':
+              return 'rgba(128, 128, 255, 0.3)';
+            case 'background':
+              return 'rgba(255, 128, 0, 0.5)';
+            default:
+              return '#ff0000';
+          }
+        })(),
+        pointerEvents: 'none' as const,
+        zIndex: 9999,
+        ...(guide.type === 'vertical'
+          ? {
+              left: `${guide.position}px`,
+              top: 0,
+              width:
+                guide.guideType === 'grid' || guide.guideType === 'fraction'
+                  ? '0.5px'
+                  : '1px',
+              height: '100%',
+            }
+          : {
+              top: `${guide.position}px`,
+              left: 0,
+              height:
+                guide.guideType === 'grid' || guide.guideType === 'fraction'
+                  ? '0.5px'
+                  : '1px',
+              width: '100%',
+            }),
+      };
+
+      return <div key={`${guide.type}-${index}`} style={style} />;
+    });
+  };
+
+  // Add this helper function for angle calculations
+  const calculateAngle = (cx: number, cy: number, ex: number, ey: number) => {
+    const dy = ey - cy;
+    const dx = ex - cx;
+    let theta = Math.atan2(dy, dx); // range (-PI, PI]
+    theta *= 180 / Math.PI; // rads to degs, range (-180, 180]
+    return theta;
+  };
+
+  // Add this helper function for angle snapping
+  const snapAngle = (angle: number, snapInterval: number = 45) => {
+    const snapped = Math.round(angle / snapInterval) * snapInterval;
+    return snapped;
+  };
+
+  // Add rotation handle start logic
+  const handleRotationStart = (e: React.MouseEvent, layer: Layer) => {
+    if (layer.id !== selectedLayerId || isResizing || isPanning) return;
+    e.stopPropagation();
+    e.preventDefault();
+
+    setIsRotating(true);
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    // Calculate center of the layer
+    const centerX =
+      (layer.transform.x + layer.transform.width / 2) * zoom + rect.left;
+    const centerY =
+      (layer.transform.y + layer.transform.height / 2) * zoom + rect.top;
+
+    // Calculate current angle
+    const currentAngle = calculateAngle(centerX, centerY, e.clientX, e.clientY);
+
+    setRotationStart({
+      x: centerX,
+      y: centerY,
+      angle: currentAngle - (layer.transform.rotation || 0),
+    });
+  };
+
+  // Add rotation move logic
+  useEffect(() => {
+    if (!isRotating || !selectedLayerId) return;
+
+    const handleRotationMove = (e: MouseEvent) => {
+      const layer = layerData.find((l) => l.id === selectedLayerId);
+      if (!layer) return;
+
+      // Calculate new angle
+      const currentAngle = calculateAngle(
+        rotationStart.x,
+        rotationStart.y,
+        e.clientX,
+        e.clientY
+      );
+
+      let newRotation = currentAngle - rotationStart.angle;
+
+      // Snap to angles when shift is held
+      if (e.shiftKey) {
+        newRotation = snapAngle(newRotation);
+      }
+
+      // Update layer with new rotation
+      setLayerData((prev) =>
+        prev.map((l) =>
+          l.id === selectedLayerId
+            ? {
+                ...l,
+                transform: {
+                  ...l.transform,
+                  rotation: newRotation,
+                },
+              }
+            : l
+        )
+      );
+    };
+
+    const handleRotationEnd = () => {
+      const layer = layerData.find((l) => l.id === selectedLayerId);
+      if (layer) {
+        onLayerUpdate(layer);
+      }
+      setIsRotating(false);
+    };
+
+    window.addEventListener('mousemove', handleRotationMove);
+    window.addEventListener('mouseup', handleRotationEnd);
+
+    return () => {
+      window.removeEventListener('mousemove', handleRotationMove);
+      window.removeEventListener('mouseup', handleRotationEnd);
+    };
+  }, [isRotating, selectedLayerId, rotationStart, layerData, zoom]);
+
   const renderLayer = (layer: Layer) => {
     const layerIndex = layers.find((l) => l.id === layer.id)?.index ?? 0;
     const isSelected = selectedLayerId === layer.id;
@@ -760,6 +1303,13 @@ export function Canvas({
               <>
                 <div className='absolute -inset-[4px] z-selection pointer-events-none overflow-visible'>
                   <div className='absolute inset-0 rainbow-border' />
+                </div>
+                {/* Rotation handle */}
+                <div
+                  className='absolute left-1/2 -top-8 w-0.5 h-8 bg-orange-500 origin-bottom cursor-grab active:cursor-grabbing'
+                  onMouseDown={(e) => handleRotationStart(e, layer)}
+                >
+                  <div className='absolute -top-1.5 left-1/2 w-3 h-3 -translate-x-1/2 bg-orange-500 rounded-full ring-2 ring-background shadow-md' />
                 </div>
                 {/* Resize handles */}
                 {(() => {
@@ -1020,6 +1570,13 @@ export function Canvas({
               <>
                 <div className='absolute -inset-[4px] z-selection pointer-events-none overflow-visible'>
                   <div className='absolute inset-0 rainbow-border' />
+                </div>
+                {/* Rotation handle */}
+                <div
+                  className='absolute left-1/2 -top-8 w-0.5 h-8 bg-orange-500 origin-bottom cursor-grab active:cursor-grabbing'
+                  onMouseDown={(e) => handleRotationStart(e, layer)}
+                >
+                  <div className='absolute -top-1.5 left-1/2 w-3 h-3 -translate-x-1/2 bg-orange-500 rounded-full ring-2 ring-background shadow-md' />
                 </div>
                 {/* Resize handles */}
                 {(() => {
@@ -1320,37 +1877,69 @@ export function Canvas({
       }
     }
 
-    // For corner handles
-    if (resizeHandle.length === 2) {
-      if (shouldMaintainAspectRatio) {
-        // Calculate the cursor's movement direction and magnitude
-        const dx = resizeHandle.includes('w') ? -deltaX : deltaX;
-        const dy = resizeHandle.includes('n') ? -deltaY : deltaY;
+    // Calculate potential guides for the current layer
+    const guides = calculateAlignmentGuides(
+      {
+        ...layer,
+        transform: {
+          ...layer.transform,
+          x: newX,
+          y: newY,
+          width: newWidth,
+          height: newHeight,
+        },
+      },
+      layer.id
+    );
 
-        // Project the movement onto the diagonal of the original shape
-        const diagonalLength = Math.sqrt(
-          resizeStart.width * resizeStart.width +
-            resizeStart.height * resizeStart.height
-        );
-        const movementProjection =
-          (dx * resizeStart.width + dy * resizeStart.height) / diagonalLength;
+    // Find closest guides for edges and size
+    const leftGuide = findClosestGuide(newX, guides, 'vertical');
+    const rightGuide = findClosestGuide(newX + newWidth, guides, 'vertical');
+    const topGuide = findClosestGuide(newY, guides, 'horizontal');
+    const bottomGuide = findClosestGuide(
+      newY + newHeight,
+      guides,
+      'horizontal'
+    );
+    const widthGuide = findClosestGuide(newWidth, guides, 'vertical');
+    const heightGuide = findClosestGuide(newHeight, guides, 'horizontal');
 
-        // Calculate scale based on the projected movement
-        const scale = 1 + movementProjection / diagonalLength;
-
-        // Apply the scale while maintaining aspect ratio
-        newWidth = Math.max(50, resizeStart.width * scale);
-        newHeight = Math.max(50, (resizeStart.width * scale) / aspectRatio);
-
-        // Adjust position based on which corner is being dragged
-        if (resizeHandle.includes('w')) {
-          newX = layer.transform.x + (resizeStart.width - newWidth);
-        }
-        if (resizeHandle.includes('n')) {
-          newY = layer.transform.y + (resizeStart.height - newHeight);
-        }
-      }
+    // Apply snapping based on which handle is being dragged
+    if (resizeHandle.includes('e') && rightGuide) {
+      newWidth = rightGuide.guide.position - newX;
+    } else if (resizeHandle.includes('w') && leftGuide) {
+      const oldRight = newX + newWidth;
+      newX = leftGuide.guide.position;
+      newWidth = oldRight - newX;
     }
+
+    if (resizeHandle.includes('s') && bottomGuide) {
+      newHeight = bottomGuide.guide.position - newY;
+    } else if (resizeHandle.includes('n') && topGuide) {
+      const oldBottom = newY + newHeight;
+      newY = topGuide.guide.position;
+      newHeight = oldBottom - newY;
+    }
+
+    // Apply size snapping
+    if (widthGuide && !shouldMaintainAspectRatio) {
+      newWidth = widthGuide.guide.position;
+    }
+    if (heightGuide && !shouldMaintainAspectRatio) {
+      newHeight = heightGuide.guide.position;
+    }
+
+    // Update alignment guides
+    setAlignmentGuides(
+      [
+        leftGuide?.guide,
+        rightGuide?.guide,
+        topGuide?.guide,
+        bottomGuide?.guide,
+        widthGuide?.guide,
+        heightGuide?.guide,
+      ].filter((guide): guide is AlignmentGuide => guide !== undefined)
+    );
 
     // Update layer with new dimensions
     setLayerData((prev) =>
@@ -1370,30 +1959,6 @@ export function Canvas({
       )
     );
   };
-
-  const handleResizeEnd = () => {
-    if (isResizing && selectedLayerId) {
-      const layer = layerData.find((l) => l.id === selectedLayerId);
-      if (layer) {
-        onLayerUpdate(layer);
-      }
-    }
-    setIsResizing(false);
-    setResizeHandle(null);
-  };
-
-  // Add resize event listeners
-  useEffect(() => {
-    if (!isResizing) return;
-
-    window.addEventListener('mousemove', handleResizeMove);
-    window.addEventListener('mouseup', handleResizeEnd);
-
-    return () => {
-      window.removeEventListener('mousemove', handleResizeMove);
-      window.removeEventListener('mouseup', handleResizeEnd);
-    };
-  }, [isResizing, resizeHandle, resizeStart, selectedLayerId, zoom]);
 
   // Handle canvas resize
   const handleCanvasResizeStart = (
@@ -1694,6 +2259,9 @@ export function Canvas({
               <div className='absolute inset-0' style={{ overflow: 'visible' }}>
                 {/* Render layers */}
                 {sortedLayers.map((layer) => renderLayer(layer))}
+
+                {/* Render alignment guides */}
+                {(isDragging || isResizing) && renderAlignmentGuides()}
               </div>
 
               {/* Eraser path overlay */}

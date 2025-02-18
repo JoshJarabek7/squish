@@ -34,7 +34,6 @@ import {
   useSortable,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
 
 interface LayerPanelTriggerProps {
   isOpen: boolean;
