@@ -594,64 +594,110 @@ export default function Playground() {
   const handleLayerReorder = async (layerId: string, newIndex: number) => {
     if (!currentProject) return;
 
-    const db = await getDatabase();
+    const maxRetries = 3;
+    const retryDelay = 100;
+    let attempt = 0;
 
-    try {
-      // Start a transaction
-      await db.execute('BEGIN IMMEDIATE');
+    // Get current index of the layer being moved
+    const currentIndex =
+      currentProject.layers.find((l) => l.id === layerId)?.index ?? 0;
 
-      // Get current index of the layer being moved
-      const currentIndex =
-        currentProject.layers.find((l) => l.id === layerId)?.index ?? 0;
+    // Create a new array of layers with updated indices
+    const updatedLayers = currentProject.layers.map((layer) => {
+      if (layer.id === layerId) {
+        // This is the layer being moved
+        return { ...layer, index: newIndex };
+      } else if (currentIndex < newIndex) {
+        // Moving forward: decrement indices of layers between old and new position
+        if (layer.index > currentIndex && layer.index <= newIndex) {
+          return { ...layer, index: layer.index - 1 };
+        }
+      } else if (currentIndex > newIndex) {
+        // Moving backward: increment indices of layers between new and old position
+        if (layer.index >= newIndex && layer.index < currentIndex) {
+          return { ...layer, index: layer.index + 1 };
+        }
+      }
+      return layer;
+    });
 
-      // Create a new array of layers with updated indices
-      const updatedLayers = currentProject.layers.map((layer) => {
-        if (layer.id === layerId) {
-          // This is the layer being moved
-          return { ...layer, index: newIndex };
-        } else if (currentIndex < newIndex) {
-          // Moving forward: decrement indices of layers between old and new position
-          if (layer.index > currentIndex && layer.index <= newIndex) {
-            return { ...layer, index: layer.index - 1 };
-          }
-        } else if (currentIndex > newIndex) {
-          // Moving backward: increment indices of layers between new and old position
-          if (layer.index >= newIndex && layer.index < currentIndex) {
-            return { ...layer, index: layer.index + 1 };
-          }
+    // Create a map of layer IDs to their new indices for quick lookup
+    const indexMap = new Map(
+      updatedLayers.map((layer) => [layer.id, layer.index])
+    );
+
+    // Update layerData with the same exact position logic
+    const updatedLayerData = layerData
+      .map((layer) => {
+        const newIndex = indexMap.get(layer.id);
+        if (newIndex !== undefined) {
+          return layer; // Keep the layer data exactly as is - only the order matters
         }
         return layer;
+      })
+      .sort((a, b) => {
+        const aIndex = indexMap.get(a.id) ?? 0;
+        const bIndex = indexMap.get(b.id) ?? 0;
+        return aIndex - bIndex;
       });
 
-      // Update all layer indices in the database
-      await Promise.all(
-        updatedLayers.map((layer) =>
-          db.execute(
-            'UPDATE layer_order SET index_number = $1 WHERE project_id = $2 AND layer_id = $3',
-            [layer.index, currentProject.id, layer.id]
-          )
-        )
-      );
+    // Update both states immediately for smooth UI
+    setCurrentProject({
+      ...currentProject,
+      layers: updatedLayers,
+    });
+    setLayerData(updatedLayerData);
 
-      // Commit the transaction
-      await db.execute('COMMIT');
-
-      // Update local state
-      setCurrentProject({
-        ...currentProject,
-        layers: updatedLayers,
-      });
-
-      // Update the project's last modified timestamp
-      await updateProjectTimestamp(currentProject.id);
-    } catch (error) {
-      console.error('Failed to reorder layer:', error);
+    while (attempt < maxRetries) {
+      const db = await getDatabase();
       try {
-        await db.execute('ROLLBACK');
-      } catch (rollbackError) {
-        console.error('Failed to rollback:', rollbackError);
+        // Use withTransaction helper for proper transaction management
+        await withTransaction(db, async () => {
+          // Update all layer indices in the database
+          await Promise.all(
+            updatedLayers.map((layer) =>
+              db.execute(
+                'UPDATE layer_order SET index_number = $1 WHERE project_id = $2 AND layer_id = $3',
+                [layer.index, currentProject.id, layer.id]
+              )
+            )
+          );
+        });
+
+        // Update the project's last modified timestamp
+        await updateProjectTimestamp(currentProject.id);
+
+        // If we get here, the operation was successful
+        return;
+      } catch (error) {
+        console.error(
+          `Failed to reorder layer (attempt ${attempt + 1}):`,
+          error
+        );
+
+        // Only retry on database lock errors
+        if (
+          error instanceof Error &&
+          error.message.includes('database is locked')
+        ) {
+          attempt++;
+          if (attempt < maxRetries) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, retryDelay * attempt)
+            );
+            continue;
+          }
+        }
+
+        // For other errors or if we've exhausted retries, revert both states
+        setCurrentProject({
+          ...currentProject,
+          layers: currentProject.layers,
+        });
+        setLayerData(layerData);
+        toast.error('Failed to reorder layer');
+        return;
       }
-      toast.error('Failed to reorder layer');
     }
   };
 

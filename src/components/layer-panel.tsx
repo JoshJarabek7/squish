@@ -81,26 +81,21 @@ function SortableLayerItem({
   onDuplicate,
   assetUrl,
 }: SortableLayerItemProps) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: layer.id });
+  const { attributes, listeners, setNodeRef, transform, isDragging } =
+    useSortable({ id: layer.id });
 
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-  };
+  const style = transform
+    ? {
+        transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
+      }
+    : undefined;
 
   return (
     <div
       ref={setNodeRef}
       style={style}
       className={cn(
-        'layer-item group relative rounded-lg border bg-card transition-colors',
+        'layer-item group relative rounded-lg border bg-card',
         isSelected && 'border-primary',
         isDragging && 'opacity-50 scale-95 z-50 shadow-lg'
       )}
@@ -304,7 +299,7 @@ export function LayerPanel({
                   );
                 })}
               </SortableContext>
-              <DragOverlay>
+              <DragOverlay dropAnimation={null}>
                 {activeLayer ? (
                   <SortableLayerItem
                     layer={activeLayer}
