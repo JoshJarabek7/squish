@@ -772,7 +772,6 @@ export function Canvas({
     const commonProps = {
       className: cn(
         'absolute select-none layer',
-        isSelected && 'ring-2 ring-primary ring-offset-2',
         isDragging && isSelected ? 'cursor-grabbing' : 'cursor-grab',
         layer.type === 'text' && editingTextId === layer.id && 'cursor-text'
       ),
@@ -785,7 +784,7 @@ export function Canvas({
         opacity: layer.transform.opacity,
         mixBlendMode: layer.transform
           .blendMode as React.CSSProperties['mixBlendMode'],
-        zIndex: layerIndex * 10, // Use multiplier to leave room between indices
+        zIndex: layerIndex * 10,
       },
       onClick: (e: React.MouseEvent) => handleLayerClick(e, layer.id),
       onMouseDown: (e: React.MouseEvent) => handleMouseDown(e, layer),
@@ -826,48 +825,43 @@ export function Canvas({
               className='w-full h-full object-contain'
               draggable={false}
             />
-            <div className='absolute inset-0 border-2 border-dashed border-primary border-opacity-50' />
-            {/* Resize handles */}
+            {/* Selection border */}
             {isSelected && (
               <>
+                <div className='absolute -inset-[4px] z-selection pointer-events-none overflow-visible'>
+                  <div className='absolute inset-0 rainbow-border' />
+                </div>
+                {/* Resize handles */}
                 <div
-                  className='absolute -top-1 -left-1 w-2 h-2 bg-primary rounded-full cursor-nw-resize transform -translate-x-1/2 -translate-y-1/2'
-                  style={{ zIndex: 999999 }}
+                  className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-nw-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
                   onMouseDown={(e) => handleResizeStart(e, 'nw')}
                 />
                 <div
-                  className='absolute -top-1 -right-1 w-2 h-2 bg-primary rounded-full cursor-ne-resize transform translate-x-1/2 -translate-y-1/2'
-                  style={{ zIndex: 999999 }}
+                  className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-ne-resize transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
                   onMouseDown={(e) => handleResizeStart(e, 'ne')}
                 />
                 <div
-                  className='absolute -bottom-1 -left-1 w-2 h-2 bg-primary rounded-full cursor-sw-resize transform -translate-x-1/2 translate-y-1/2'
-                  style={{ zIndex: 999999 }}
+                  className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-sw-resize transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
                   onMouseDown={(e) => handleResizeStart(e, 'sw')}
                 />
                 <div
-                  className='absolute -bottom-1 -right-1 w-2 h-2 bg-primary rounded-full cursor-se-resize transform translate-x-1/2 translate-y-1/2'
-                  style={{ zIndex: 999999 }}
+                  className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-se-resize transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
                   onMouseDown={(e) => handleResizeStart(e, 'se')}
                 />
                 <div
-                  className='absolute top-1/2 -left-1 w-2 h-2 bg-primary rounded-full cursor-w-resize transform -translate-x-1/2 -translate-y-1/2'
-                  style={{ zIndex: 999999 }}
+                  className='absolute top-1/2 -left-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-w-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
                   onMouseDown={(e) => handleResizeStart(e, 'w')}
                 />
                 <div
-                  className='absolute top-1/2 -right-1 w-2 h-2 bg-primary rounded-full cursor-e-resize transform translate-x-1/2 -translate-y-1/2'
-                  style={{ zIndex: 999999 }}
+                  className='absolute top-1/2 -right-1.5 w-3 h-3 bg-orange-500 rounded-full cursor-e-resize transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
                   onMouseDown={(e) => handleResizeStart(e, 'e')}
                 />
                 <div
-                  className='absolute -top-1 left-1/2 w-2 h-2 bg-primary rounded-full cursor-n-resize transform -translate-x-1/2 -translate-y-1/2'
-                  style={{ zIndex: 999999 }}
+                  className='absolute -top-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full cursor-n-resize transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
                   onMouseDown={(e) => handleResizeStart(e, 'n')}
                 />
                 <div
-                  className='absolute -bottom-1 left-1/2 w-2 h-2 bg-primary rounded-full cursor-s-resize transform -translate-x-1/2 translate-y-1/2'
-                  style={{ zIndex: 999999 }}
+                  className='absolute -bottom-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full cursor-s-resize transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
                   onMouseDown={(e) => handleResizeStart(e, 's')}
                 />
               </>
@@ -1040,9 +1034,8 @@ export function Canvas({
             {/* Selection border */}
             {selectedLayerId === layer.id && (
               <>
-                <div className='absolute inset-0 z-selection pointer-events-none'>
-                  <div className='absolute inset-0 bg-selection-pattern animate-border-dance opacity-70' />
-                  <div className='absolute inset-0 border-[3px] border-orange-500/70' />
+                <div className='absolute -inset-[4px] z-selection pointer-events-none overflow-visible'>
+                  <div className='absolute inset-0 rainbow-border' />
                 </div>
                 {/* Resize handles */}
                 <div

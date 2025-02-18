@@ -142,3 +142,49 @@
     @apply bg-background text-foreground;
   }
 }
+
+@property --border-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.rainbow-border {
+  position: absolute;
+  inset: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  animation: border-rotate 8s linear infinite;
+  background-image: conic-gradient(
+    from var(--border-angle),
+    rgb(255 0 0) 0deg,
+    rgb(255 154 0) 60deg,
+    /* rgb(255 255 0) 120deg, */ /* rgb(0 255 0) 180deg, */ rgb(0 149 255)
+      240deg,
+    rgb(153 0 255) 300deg,
+    rgb(255 0 0) 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  padding: 1px;
+  background-clip: border-box;
+  -webkit-background-clip: border-box;
+}
+
+@keyframes border-rotate {
+  to {
+    --border-angle: 360deg;
+  }
+}
+
+.rainbow-border::before,
+.rainbow-border::after {
+  display: none;
+}
