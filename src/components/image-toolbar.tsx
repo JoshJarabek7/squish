@@ -12,15 +12,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog';
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { SegmentationDialog } from '@/components/segmentation-dialog';
 import { cn } from '@/lib/utils';
 
 interface ImageToolbarProps {
@@ -30,10 +22,11 @@ interface ImageToolbarProps {
   onFlipVertical?: () => void;
   onStartEraserMode?: () => void;
   onSplitByTransparency?: () => void;
-  onSegment?: (mode: 'bounding-box' | 'auto' | 'semantic') => void;
+  onSegment?: (images: string[]) => void;
   onDelete?: () => void;
   onDuplicate?: () => void;
   className?: string;
+  assetUrl?: string;
 }
 
 export function ImageToolbar({
@@ -46,6 +39,7 @@ export function ImageToolbar({
   onDelete,
   onDuplicate,
   className,
+  assetUrl,
 }: ImageToolbarProps) {
   const [isExpanded, setIsExpanded] = useState(true);
   const [segmentationOpen, setSegmentationOpen] = useState(false);
@@ -119,52 +113,16 @@ export function ImageToolbar({
                 <Scissors className='h-4 w-4' />
               </Button>
 
-              {layer.type === 'image' && (
-                <Dialog
-                  open={segmentationOpen}
-                  onOpenChange={setSegmentationOpen}
+              {layer.type === 'image' && assetUrl && (
+                <Button
+                  variant='ghost'
+                  size='icon'
+                  className='h-8 w-8'
+                  onClick={() => setSegmentationOpen(true)}
+                  title='Segment Image'
                 >
-                  <DialogTrigger asChild>
-                    <Button
-                      variant='ghost'
-                      size='icon'
-                      className='h-8 w-8'
-                      title='Segment Image'
-                    >
-                      <Scan className='h-4 w-4' />
-                    </Button>
-                  </DialogTrigger>
-                  <DialogContent>
-                    <DialogHeader>
-                      <DialogTitle>Segment Image</DialogTitle>
-                      <DialogDescription>
-                        Choose a segmentation mode to extract parts of the
-                        image.
-                      </DialogDescription>
-                    </DialogHeader>
-                    <div className='py-4'>
-                      <ToggleGroup
-                        type='single'
-                        onValueChange={(value) => {
-                          if (value && onSegment) {
-                            onSegment(
-                              value as 'bounding-box' | 'auto' | 'semantic'
-                            );
-                            setSegmentationOpen(false);
-                          }
-                        }}
-                      >
-                        <ToggleGroupItem value='bounding-box'>
-                          Bounding Box
-                        </ToggleGroupItem>
-                        <ToggleGroupItem value='auto'>Auto</ToggleGroupItem>
-                        <ToggleGroupItem value='semantic'>
-                          Semantic
-                        </ToggleGroupItem>
-                      </ToggleGroup>
-                    </div>
-                  </DialogContent>
-                </Dialog>
+                  <Scan className='h-4 w-4' />
+                </Button>
               )}
 
               <div className='h-8 w-px bg-border' />
@@ -192,6 +150,19 @@ export function ImageToolbar({
           </div>
         )}
       </div>
+
+      {/* Segmentation Dialog */}
+      {layer.type === 'image' && assetUrl && (
+        <SegmentationDialog
+          open={segmentationOpen}
+          onOpenChange={setSegmentationOpen}
+          imageUrl={assetUrl}
+          onSegmentationComplete={(images) => {
+            setSegmentationOpen(false);
+            onSegment?.(images);
+          }}
+        />
+      )}
     </div>
   );
 }

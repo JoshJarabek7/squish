@@ -1,7 +1,7 @@
 // canvas.tsx
 
 import { useRef, useState, useEffect } from 'react';
-import { Layer } from '@/types/ProjectType';
+import { Layer, ImageLayer, StickerLayer } from '@/types/ProjectType';
 import { cn } from '@/lib/utils';
 import {
   getProjectLayers,
@@ -15,6 +15,14 @@ import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { compareLayersForRender } from '@/lib/utils';
 import { LayerContextMenu } from '@/components/layer-context-menu';
+import { nanoid } from 'nanoid';
+import {
+  createImageAsset,
+  createLayer,
+  updateProjectTimestamp,
+  createAction,
+} from '@/lib/db';
+import { ImageToolbar } from '@/components/image-toolbar';
 
 interface CanvasProps {
   projectId: string;
@@ -1414,11 +1422,135 @@ export function Canvas({
     void reload();
   }, [projectId, canvasSettingsVersion, layers]);
 
+  const handleSegmentation = async (images: string[]) => {
+    if (!projectId) return;
+
+    try {
+      // Create new layers for each segmented image
+      for (const imageUrl of images) {
+        // Convert data URL to Uint8Array
+        const response = await fetch(imageUrl);
+        const blob = await response.blob();
+        const arrayBuffer = await blob.arrayBuffer();
+        const data = new Uint8Array(arrayBuffer);
+
+        // Create image asset
+        const assetId = await createImageAsset(
+          'segmented-image.png',
+          'image/png',
+          data
+        );
+
+        // Create blob URL for immediate display
+        const url = URL.createObjectURL(blob);
+
+        // Update assetData state first
+        setAssetData((prev) => ({
+          ...prev,
+          [assetId]: {
+            url,
+            loading: false,
+            error: false,
+          },
+        }));
+
+        // Get image dimensions
+        const img = new Image();
+        const imageSize = await new Promise<{ width: number; height: number }>(
+          (resolve, reject) => {
+            img.onload = () =>
+              resolve({
+                width: img.naturalWidth,
+                height: img.naturalHeight,
+              });
+            img.onerror = reject;
+            img.src = url;
+          }
+        );
+
+        // Create the layer
+        const newLayer = {
+          id: nanoid(),
+          type: 'image' as const,
+          imageAssetId: assetId,
+          transform: {
+            x: 960 - imageSize.width / 2,
+            y: 540 - imageSize.height / 2,
+            width: imageSize.width,
+            height: imageSize.height,
+            rotation: 0,
+            scaleX: 1,
+            scaleY: 1,
+            opacity: 1,
+            blendMode: 'normal',
+          },
+        };
+
+        // Record the action before creating the layer
+        await createAction({
+          projectId,
+          type: 'add_layer',
+          layerId: newLayer.id,
+          before: null,
+          after: {
+            ...newLayer,
+            index: layers.length,
+          },
+        });
+
+        // Create the layer in the database
+        await createLayer(projectId, newLayer);
+      }
+
+      // Get the updated layer data
+      const updatedLayers = await getProjectLayers(projectId);
+
+      // Update all states in a single batch
+      setLayerData(updatedLayers);
+      onLayerSelect(null); // Deselect any selected layer
+
+      // Update the project's last modified timestamp
+      await updateProjectTimestamp(projectId);
+
+      toast.success(`Added ${images.length} segmented layers`);
+    } catch (error) {
+      console.error('Failed to create segmented layers:', error);
+      toast.error('Failed to create segmented layers');
+    }
+  };
+
+  const handleFlipHorizontal = () => {
+    if (!selectedLayerId) return;
+    const layer = layerData.find((l) => l.id === selectedLayerId);
+    if (!layer) return;
+
+    onLayerUpdate({
+      ...layer,
+      transform: {
+        ...layer.transform,
+        scaleX: (layer.transform.scaleX ?? 1) * -1,
+      },
+    });
+  };
+
+  const handleFlipVertical = () => {
+    if (!selectedLayerId) return;
+    const layer = layerData.find((l) => l.id === selectedLayerId);
+    if (!layer) return;
+
+    onLayerUpdate({
+      ...layer,
+      transform: {
+        ...layer.transform,
+        scaleY: (layer.transform.scaleY ?? 1) * -1,
+      },
+    });
+  };
+
   const renderLayer = (layer: Layer) => {
     const layerIndex = layers.find((l) => l.id === layer.id)?.index ?? 0;
     const isSelected = selectedLayerId === layer.id;
-    const zIndexBoost = isSelected ? 9999 : 0;
-    const effectiveZIndex = layerIndex * 10 + zIndexBoost;
+    const effectiveZIndex = layerIndex * 10 + (isSelected ? 1000 : 0);
 
     const commonProps = {
       className: cn(
@@ -1526,7 +1658,7 @@ export function Canvas({
             />
             {isSelected && (
               <div
-                className='absolute inset-0 z-[9999]'
+                className='absolute inset-0 z-[1000]'
                 style={{ pointerEvents: 'none' }}
               >
                 <div className='absolute -inset-[4px] overflow-visible'>
@@ -1706,7 +1838,7 @@ export function Canvas({
 
           {isSelected && (
             <div
-              className='absolute inset-0 z-[9999]'
+              className='absolute inset-0 z-[1000]'
               style={{ pointerEvents: 'none' }}
             >
               <div className='absolute -inset-[4px] overflow-visible'>

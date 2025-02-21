@@ -95,36 +95,21 @@ export const convertToTransparentPng = async (
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const pixelData = imageData.data;
 
-    // If the image is already PNG with transparency, return as is
-    if (effectiveMimeType === 'image/png') {
-      const hasTransparency = Array.from(pixelData).some(
-        (value, index) => (index + 1) % 4 === 0 && value < 255
-      );
-      if (hasTransparency) {
-        // Convert Uint8ClampedArray to Uint8Array
-        const uint8Array = new Uint8Array(pixelData.buffer);
-        return { data: uint8Array, mimeType: 'image/png' };
-      }
-    }
-
     // Convert to PNG with transparency
-    const pngBlob = await new Promise<Blob>((resolve) => {
+    const pngBlob = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob((blob) => {
-        resolve(blob!);
+        if (blob) resolve(blob);
+        else reject(new Error('toBlob returned null'));
       }, 'image/png');
     });
 
-    // Convert blob to Uint8Array
     const arrayBuffer = await pngBlob.arrayBuffer();
     const pngData = new Uint8Array(arrayBuffer);
 
     // Clean up
     URL.revokeObjectURL(imageUrl);
 
-    return {
-      data: pngData,
-      mimeType: 'image/png',
-    };
+    return { data: pngData, mimeType: 'image/png' };
   } catch (error) {
     // Clean up on error
     URL.revokeObjectURL(imageUrl);

@@ -1376,6 +1376,109 @@ export default function Playground() {
     loadActions();
   }, [currentProject?.id]);
 
+  // Update the handleSegmentation function
+  const handleSegmentation = async (images: string[]) => {
+    if (!currentProject) return;
+
+    try {
+      // Create new layers for each segmented image
+      for (const imageUrl of images) {
+        // Convert data URL to Uint8Array
+        const response = await fetch(imageUrl);
+        const blob = await response.blob();
+        const arrayBuffer = await blob.arrayBuffer();
+        const data = new Uint8Array(arrayBuffer);
+
+        // Create image asset
+        const assetId = await createImageAsset(
+          'segmented-image.png',
+          'image/png',
+          data
+        );
+
+        // Create blob URL for immediate display
+        const url = URL.createObjectURL(blob);
+
+        // Update assetData state first
+        setAssetData((prev) => ({
+          ...prev,
+          [assetId]: {
+            url,
+            loading: false,
+            error: false,
+          },
+        }));
+
+        // Get image dimensions
+        const img = new Image();
+        const imageSize = await new Promise<{ width: number; height: number }>(
+          (resolve, reject) => {
+            img.onload = () =>
+              resolve({
+                width: img.naturalWidth,
+                height: img.naturalHeight,
+              });
+            img.onerror = reject;
+            img.src = url;
+          }
+        );
+
+        // Create the layer
+        const newLayer = {
+          id: nanoid(),
+          type: 'image' as const,
+          imageAssetId: assetId,
+          transform: {
+            x: 960 - imageSize.width / 2,
+            y: 540 - imageSize.height / 2,
+            width: imageSize.width,
+            height: imageSize.height,
+            rotation: 0,
+            scaleX: 1,
+            scaleY: 1,
+            opacity: 1,
+            blendMode: 'normal',
+          },
+        };
+
+        // Record the action before creating the layer
+        await createAction({
+          projectId: currentProject.id,
+          type: 'add_layer',
+          layerId: newLayer.id,
+          before: null,
+          after: {
+            ...newLayer,
+            index: currentProject.layers.length,
+          },
+        });
+
+        // Create the layer in the database
+        await createLayer(currentProject.id, newLayer);
+      }
+
+      // Get the updated project and layer data
+      const [updatedLayers, updatedProject] = await Promise.all([
+        getProjectLayers(currentProject.id),
+        getProjectWithLayers(currentProject.id),
+      ]);
+
+      // Update all states in a single batch
+      setLayerData(updatedLayers);
+      setCurrentProject(updatedProject);
+      setSelectedLayerId(null); // Deselect any selected layer
+      setCanvasSettingsVersion((v) => v + 1); // Force canvas refresh
+
+      // Update the project's last modified timestamp
+      await updateProjectTimestamp(currentProject.id);
+
+      toast.success(`Added ${images.length} segmented layers`);
+    } catch (error) {
+      console.error('Failed to create segmented layers:', error);
+      toast.error('Failed to create segmented layers');
+    }
+  };
+
   return (
     <main className='w-screen h-screen bg-background text-foreground flex'>
       <SidebarProvider>
@@ -1400,59 +1503,60 @@ export default function Playground() {
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger asChild>
-                            <SidebarMenuButton
-                              onClick={() => handleProjectClick(project)}
-                              className={cn(
-                                currentProject?.id === project.id
-                                  ? 'bg-accent'
-                                  : '',
-                                'group flex justify-between items-center'
-                              )}
-                            >
-                              <div className='flex items-center gap-2'>
-                                <Folder className='w-4 h-4' />
-                                <span>{project.name}</span>
-                              </div>
-                              <AlertDialog>
-                                <AlertDialogTrigger asChild>
-                                  <Button
-                                    variant='ghost'
-                                    size='icon'
-                                    className='h-6 w-6 opacity-0 group-hover:opacity-100 hover:bg-destructive/20 hover:text-destructive'
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                    }}
-                                  >
-                                    <Trash2 className='h-3 w-3' />
-                                  </Button>
-                                </AlertDialogTrigger>
-                                <AlertDialogContent>
-                                  <AlertDialogHeader>
-                                    <AlertDialogTitle>
-                                      Delete Project
-                                    </AlertDialogTitle>
-                                    <AlertDialogDescription>
-                                      Are you sure you want to delete "
-                                      {project.name}"? This action cannot be
-                                      undone.
-                                    </AlertDialogDescription>
-                                  </AlertDialogHeader>
-                                  <AlertDialogFooter>
-                                    <AlertDialogCancel>
-                                      Cancel
-                                    </AlertDialogCancel>
-                                    <AlertDialogAction
-                                      className='bg-destructive hover:bg-destructive/90'
-                                      onClick={() =>
-                                        handleDeleteProject(project)
-                                      }
+                            <span>
+                              <SidebarMenuButton
+                                onClick={() => handleProjectClick(project)}
+                                className={cn(
+                                  currentProject?.id === project.id
+                                    ? 'bg-accent'
+                                    : '',
+                                  'group flex justify-between items-center'
+                                )}
+                              >
+                                <div className='flex items-center gap-2'>
+                                  <Folder className='w-4 h-4' />
+                                  <span>{project.name}</span>
+                                </div>
+                                <AlertDialog>
+                                  <AlertDialogTrigger asChild>
+                                    <span
+                                      role='button'
+                                      className='h-6 w-6 opacity-0 group-hover:opacity-100 hover:bg-destructive/20 hover:text-destructive inline-flex items-center justify-center'
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                      }}
                                     >
-                                      Delete
-                                    </AlertDialogAction>
-                                  </AlertDialogFooter>
-                                </AlertDialogContent>
-                              </AlertDialog>
-                            </SidebarMenuButton>
+                                      <Trash2 className='h-3 w-3' />
+                                    </span>
+                                  </AlertDialogTrigger>
+                                  <AlertDialogContent>
+                                    <AlertDialogHeader>
+                                      <AlertDialogTitle>
+                                        Delete Project
+                                      </AlertDialogTitle>
+                                      <AlertDialogDescription>
+                                        Are you sure you want to delete "
+                                        {project.name}"? This action cannot be
+                                        undone.
+                                      </AlertDialogDescription>
+                                    </AlertDialogHeader>
+                                    <AlertDialogFooter>
+                                      <AlertDialogCancel>
+                                        Cancel
+                                      </AlertDialogCancel>
+                                      <AlertDialogAction
+                                        className='bg-destructive hover:bg-destructive/90'
+                                        onClick={() =>
+                                          handleDeleteProject(project)
+                                        }
+                                      >
+                                        Delete
+                                      </AlertDialogAction>
+                                    </AlertDialogFooter>
+                                  </AlertDialogContent>
+                                </AlertDialog>
+                              </SidebarMenuButton>
+                            </span>
                           </TooltipTrigger>
                           <TooltipContent>
                             <p className='font-medium'>{project.name}</p>
@@ -1555,6 +1659,8 @@ export default function Playground() {
                       onClearBackground={handleClearBackground}
                       onLayerDelete={handleLayerDelete}
                       onLayerDuplicate={handleLayerDuplicate}
+                      onSegment={handleSegmentation}
+                      assetData={assetData}
                       canvasBackground={canvasBackground}
                       gridSettings={gridSettings}
                       onGridSettingsChange={setGridSettings}
@@ -1586,7 +1692,6 @@ export default function Playground() {
                   <LayerPanelTrigger
                     isOpen={isLayerPanelOpen}
                     onClick={() => setIsLayerPanelOpen(!isLayerPanelOpen)}
-                    triggerRef={layerPanelTriggerRef}
                   />
                   <Button
                     variant='secondary'
@@ -1634,7 +1739,6 @@ export default function Playground() {
                   onLayerDuplicate={handleLayerDuplicate}
                   isOpen={isLayerPanelOpen}
                   onOpenChange={setIsLayerPanelOpen}
-                  triggerRef={layerPanelTriggerRef}
                   assetUrls={Object.fromEntries(
                     Object.entries(assetData)
                       .filter(

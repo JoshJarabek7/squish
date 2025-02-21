@@ -67,6 +67,7 @@
     "react-resizable-panels": "^2.1.7",
     "react-router": "^7.1.5",
     "recharts": "^2.15.1",
+    "runpod-sdk": "^1.0.7",
     "sonner": "^1.7.4",
     "tailwind-merge": "^3.0.1",
     "uuid": "^11.0.5",

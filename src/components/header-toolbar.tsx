@@ -44,6 +44,10 @@ interface HeaderToolbarProps {
   onClearBackground: () => void;
   onLayerDelete: (layerId: string) => void;
   onLayerDuplicate: (layerId: string) => void;
+  onSegment?: (images: string[]) => void;
+  assetData: {
+    [key: string]: { url: string; loading: boolean; error: boolean };
+  };
   canvasBackground: {
     type: 'color' | 'image' | 'none';
     color?: string;
@@ -80,6 +84,8 @@ export function HeaderToolbar({
   onClearBackground,
   onLayerDelete,
   onLayerDuplicate,
+  onSegment,
+  assetData,
   canvasBackground,
   gridSettings,
   onGridSettingsChange,
@@ -91,7 +97,6 @@ export function HeaderToolbar({
       transform: {
         ...selectedLayer.transform,
         scaleX: (selectedLayer.transform.scaleX ?? 1) * -1,
-        scaleY: selectedLayer.transform.scaleY ?? 1,
       },
     });
   };
@@ -102,7 +107,6 @@ export function HeaderToolbar({
       ...selectedLayer,
       transform: {
         ...selectedLayer.transform,
-        scaleX: selectedLayer.transform.scaleX ?? 1,
         scaleY: (selectedLayer.transform.scaleY ?? 1) * -1,
       },
     });
@@ -111,7 +115,7 @@ export function HeaderToolbar({
   return (
     <div className='flex flex-col w-full'>
       {/* Main toolbar */}
-      <div className='flex items-center justify-between w-full px-4 h-14 bg-background border-b'>
+      <div className='flex items-center justify-between w-full px-4 h-14 bg-background border-b z-[10000] relative'>
         {/* Left side */}
         <div className='flex items-center gap-4'>
           {sidebarTrigger}
@@ -352,7 +356,7 @@ export function HeaderToolbar({
 
       {/* Layer-specific toolbar */}
       {selectedLayer && (
-        <div className='w-full bg-background border-b relative'>
+        <div className='w-full bg-background border-b relative z-[10000]'>
           {selectedLayer.type === 'text' ? (
             <TextToolbar
               layer={selectedLayer as TextLayer}
@@ -370,6 +374,12 @@ export function HeaderToolbar({
               onFlipVertical={handleFlipVertical}
               onDelete={() => onLayerDelete(selectedLayer.id)}
               onDuplicate={() => onLayerDuplicate(selectedLayer.id)}
+              assetUrl={
+                selectedLayer.type === 'image'
+                  ? assetData[selectedLayer.imageAssetId]?.url
+                  : assetData[selectedLayer.stickerAssetId]?.url
+              }
+              onSegment={onSegment}
             />
           )}
         </div>
