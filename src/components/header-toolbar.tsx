@@ -14,6 +14,7 @@ import {
   Redo,
   Download,
   Palette,
+  Grid,
 } from 'lucide-react';
 import {
   Popover,
@@ -21,6 +22,9 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
+import { Slider } from '@/components/ui/slider';
 
 interface HeaderToolbarProps {
   selectedLayer: Layer | null;
@@ -40,12 +44,28 @@ interface HeaderToolbarProps {
   onClearBackground: () => void;
   onLayerDelete: (layerId: string) => void;
   onLayerDuplicate: (layerId: string) => void;
+  onSegment?: (images: string[]) => void;
+  assetData: {
+    [key: string]: { url: string; loading: boolean; error: boolean };
+  };
   canvasBackground: {
     type: 'color' | 'image' | 'none';
     color?: string;
     imageId?: string;
     imageUrl?: string;
   };
+  gridSettings: {
+    enabled: boolean;
+    columns: number;
+    rows: number;
+    showFractions: boolean;
+  };
+  onGridSettingsChange: (settings: {
+    enabled: boolean;
+    columns: number;
+    rows: number;
+    showFractions: boolean;
+  }) => void;
 }
 
 export function HeaderToolbar({
@@ -64,7 +84,11 @@ export function HeaderToolbar({
   onClearBackground,
   onLayerDelete,
   onLayerDuplicate,
+  onSegment,
+  assetData,
   canvasBackground,
+  gridSettings,
+  onGridSettingsChange,
 }: HeaderToolbarProps) {
   const handleFlipHorizontal = () => {
     if (!selectedLayer) return;
@@ -73,7 +97,6 @@ export function HeaderToolbar({
       transform: {
         ...selectedLayer.transform,
         scaleX: (selectedLayer.transform.scaleX ?? 1) * -1,
-        scaleY: selectedLayer.transform.scaleY ?? 1,
       },
     });
   };
@@ -84,7 +107,6 @@ export function HeaderToolbar({
       ...selectedLayer,
       transform: {
         ...selectedLayer.transform,
-        scaleX: selectedLayer.transform.scaleX ?? 1,
         scaleY: (selectedLayer.transform.scaleY ?? 1) * -1,
       },
     });
@@ -93,7 +115,7 @@ export function HeaderToolbar({
   return (
     <div className='flex flex-col w-full'>
       {/* Main toolbar */}
-      <div className='flex items-center justify-between w-full px-4 h-14 bg-background border-b'>
+      <div className='flex items-center justify-between w-full px-4 h-14 bg-background border-b z-[10000] relative'>
         {/* Left side */}
         <div className='flex items-center gap-4'>
           {sidebarTrigger}
@@ -141,6 +163,83 @@ export function HeaderToolbar({
 
         {/* Right side */}
         <div className='flex items-center gap-2'>
+          {/* Grid controls */}
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant='ghost'
+                size='icon'
+                className={cn(gridSettings.enabled && 'bg-accent')}
+                title='Grid Settings'
+              >
+                <Grid className='h-4 w-4' />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className='w-80 p-4' side='bottom' align='end'>
+              <div className='space-y-4'>
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='grid-enabled'>Show Grid</Label>
+                  <Switch
+                    id='grid-enabled'
+                    checked={gridSettings.enabled}
+                    onCheckedChange={(checked) =>
+                      onGridSettingsChange({
+                        ...gridSettings,
+                        enabled: checked,
+                      })
+                    }
+                  />
+                </div>
+
+                <div className='space-y-2'>
+                  <Label>Columns ({gridSettings.columns})</Label>
+                  <Slider
+                    min={2}
+                    max={16}
+                    step={1}
+                    value={[gridSettings.columns]}
+                    onValueChange={([value]) =>
+                      onGridSettingsChange({
+                        ...gridSettings,
+                        columns: value,
+                      })
+                    }
+                  />
+                </div>
+
+                <div className='space-y-2'>
+                  <Label>Rows ({gridSettings.rows})</Label>
+                  <Slider
+                    min={2}
+                    max={16}
+                    step={1}
+                    value={[gridSettings.rows]}
+                    onValueChange={([value]) =>
+                      onGridSettingsChange({
+                        ...gridSettings,
+                        rows: value,
+                      })
+                    }
+                  />
+                </div>
+
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='show-fractions'>Show Fractions</Label>
+                  <Switch
+                    id='show-fractions'
+                    checked={gridSettings.showFractions}
+                    onCheckedChange={(checked) =>
+                      onGridSettingsChange({
+                        ...gridSettings,
+                        showFractions: checked,
+                      })
+                    }
+                  />
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
+
           {/* Background controls */}
           <Popover>
             <PopoverTrigger asChild>
@@ -257,7 +356,7 @@ export function HeaderToolbar({
 
       {/* Layer-specific toolbar */}
       {selectedLayer && (
-        <div className='w-full bg-background border-b relative'>
+        <div className='w-full bg-background border-b relative z-[10000]'>
           {selectedLayer.type === 'text' ? (
             <TextToolbar
               layer={selectedLayer as TextLayer}
@@ -275,6 +374,12 @@ export function HeaderToolbar({
               onFlipVertical={handleFlipVertical}
               onDelete={() => onLayerDelete(selectedLayer.id)}
               onDuplicate={() => onLayerDuplicate(selectedLayer.id)}
+              assetUrl={
+                selectedLayer.type === 'image'
+                  ? assetData[selectedLayer.imageAssetId]?.url
+                  : assetData[selectedLayer.stickerAssetId]?.url
+              }
+              onSegment={onSegment}
             />
           )}
         </div>

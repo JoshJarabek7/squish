@@ -56,10 +56,13 @@ export const deepEqual = isEqual;
 // Convert image to transparent PNG
 export const convertToTransparentPng = async (
   data: Uint8Array,
-  mimeType: string
+  mimeType: string | undefined
 ): Promise<{ data: Uint8Array; mimeType: string }> => {
+  // Use a default mimeType if none provided
+  const effectiveMimeType = mimeType || 'image/png';
+  
   // Create a blob from the input data
-  const blob = new Blob([data], { type: mimeType });
+  const blob = new Blob([data], { type: effectiveMimeType });
   const imageUrl = URL.createObjectURL(blob);
 
   try {
@@ -92,43 +95,28 @@ export const convertToTransparentPng = async (
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const pixelData = imageData.data;
 
-    // If the image is already PNG with transparency, return as is
-    if (mimeType === 'image/png') {
-      const hasTransparency = Array.from(pixelData).some(
-        (value, index) => (index + 1) % 4 === 0 && value < 255
-      );
-      if (hasTransparency) {
-        // Convert Uint8ClampedArray to Uint8Array
-        const uint8Array = new Uint8Array(pixelData.buffer);
-        return { data: uint8Array, mimeType: 'image/png' };
-      }
-    }
-
     // Convert to PNG with transparency
-    const pngBlob = await new Promise<Blob>((resolve) => {
+    const pngBlob = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob((blob) => {
-        resolve(blob!);
+        if (blob) resolve(blob);
+        else reject(new Error('toBlob returned null'));
       }, 'image/png');
     });
 
-    // Convert blob to Uint8Array
     const arrayBuffer = await pngBlob.arrayBuffer();
     const pngData = new Uint8Array(arrayBuffer);
 
     // Clean up
     URL.revokeObjectURL(imageUrl);
 
-    return {
-      data: pngData,
-      mimeType: 'image/png',
-    };
+    return { data: pngData, mimeType: 'image/png' };
   } catch (error) {
     // Clean up on error
     URL.revokeObjectURL(imageUrl);
     console.error('Error converting image:', error);
 
     // Return original data if conversion fails
-    return { data, mimeType };
+    return { data, mimeType: effectiveMimeType };
   }
 };
 
@@ -146,36 +134,50 @@ export type ExportLayer = {
     opacity: number;
     blendMode: string;
   };
-  content?: string;
-  style?: {
-    fontFamily: string;
-    fontSize: number;
-    fontWeight: number;
-    color: string;
-    backgroundColor?: string;
-    textAlign: 'left' | 'center' | 'right';
-    italic: boolean;
-    underline: boolean;
-    verticalAlign: 'top' | 'center' | 'bottom';
-    wordWrap: 'normal' | 'break-word';
-    stroke?: {
-      enabled: boolean;
-      width: number;
-      color: string;
-    };
-  };
-  imageUrl?: string;
+} & (
+  | {
+      type: 'text';
+      content: string;
+      style: {
+        fontFamily: string;
+        fontSize: number;
+        fontWeight: number;
+        color: string;
+        backgroundColor?: string;
+        textAlign: 'left' | 'center' | 'right';
+        italic: boolean;
+        underline: boolean;
+        verticalAlign: 'top' | 'center' | 'bottom';
+        wordWrap: 'normal' | 'break-word';
+        stroke?: {
+          enabled: boolean;
+          width: number;
+          color: string;
+        };
+      };
+    }
+  | {
+      type: 'image' | 'sticker';
+      imageUrl: string;
+    }
+);
+
+// Update the background type to be more specific
+type ExportBackground = {
+  type: 'color';
+  color: string;
+} | {
+  type: 'image';
+  imageUrl: string;
+} | {
+  type: 'none';
 };
 
 export const exportCanvasAsImage = async (
   layers: ExportLayer[],
   canvasWidth: number,
   canvasHeight: number,
-  background: {
-    type: 'color' | 'image' | 'none';
-    color?: string;
-    imageUrl?: string;
-  }
+  background: ExportBackground
 ): Promise<Blob> => {
   // Create a canvas with the specified dimensions
   const canvas = document.createElement('canvas');
@@ -188,10 +190,10 @@ export const exportCanvasAsImage = async (
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   // Draw background
-  if (background.type === 'color' && background.color) {
+  if (background.type === 'color') {
     ctx.fillStyle = background.color;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-  } else if (background.type === 'image' && background.imageUrl) {
+  } else if (background.type === 'image') {
     try {
       const img = await new Promise<HTMLImageElement>((resolve, reject) => {
         const image = new Image();
@@ -240,45 +242,47 @@ export const exportCanvasAsImage = async (
     ctx.scale(layer.transform.scaleX, layer.transform.scaleY);
     ctx.translate(-centerX, -centerY);
 
-    if (layer.type === 'text' && layer.content && layer.style) {
+    if (layer.type === 'text') {
+      // Text layer rendering
+      const { content, style } = layer;
       // Set text styles
-      const fontStyle = layer.style.italic ? 'italic ' : '';
-      const fontWeight = layer.style.fontWeight;
-      ctx.font = `${fontStyle}${fontWeight} ${layer.style.fontSize}px ${layer.style.fontFamily}`;
-      ctx.fillStyle = layer.style.color;
-      ctx.textAlign = layer.style.textAlign;
+      const fontStyle = style.italic ? 'italic ' : '';
+      const fontWeight = style.fontWeight;
+      ctx.font = `${fontStyle}${fontWeight} ${style.fontSize}px ${style.fontFamily}`;
+      ctx.fillStyle = style.color;
+      ctx.textAlign = style.textAlign;
       ctx.textBaseline = 'middle';
 
       // Handle background color
-      if (layer.style.backgroundColor) {
-        ctx.fillStyle = layer.style.backgroundColor;
+      if (style.backgroundColor) {
+        ctx.fillStyle = style.backgroundColor;
         ctx.fillRect(
           layer.transform.x,
           layer.transform.y,
           layer.transform.width,
           layer.transform.height
         );
-        ctx.fillStyle = layer.style.color;
+        ctx.fillStyle = style.color;
       }
 
       // Calculate text position based on alignment
       let x = layer.transform.x;
-      if (layer.style.textAlign === 'center') {
+      if (style.textAlign === 'center') {
         x += layer.transform.width / 2;
-      } else if (layer.style.textAlign === 'right') {
+      } else if (style.textAlign === 'right') {
         x += layer.transform.width;
       }
 
       let y = layer.transform.y;
-      if (layer.style.verticalAlign === 'center') {
+      if (style.verticalAlign === 'center') {
         y += layer.transform.height / 2;
-      } else if (layer.style.verticalAlign === 'bottom') {
+      } else if (style.verticalAlign === 'bottom') {
         y += layer.transform.height;
       }
 
       // Handle word wrap
-      if (layer.style.wordWrap === 'break-word') {
-        const words = layer.content.split(' ');
+      if (style.wordWrap === 'break-word') {
+        const words = content.split(' ');
         let line = '';
         let lines: string[] = [];
         const maxWidth = layer.transform.width;
@@ -295,47 +299,46 @@ export const exportCanvasAsImage = async (
         }
         lines.push(line);
 
-        const lineHeight = layer.style.fontSize * 1.2;
+        const lineHeight = style.fontSize * 1.2;
         lines.forEach((line, i) => {
           // Draw text stroke if enabled
-          if (layer.style?.stroke?.enabled) {
-            ctx.strokeStyle = layer.style.stroke.color;
-            ctx.lineWidth = layer.style.stroke.width;
+          if (style.stroke?.enabled) {
+            ctx.strokeStyle = style.stroke.color;
+            ctx.lineWidth = style.stroke.width;
             ctx.strokeText(line, x, y + i * lineHeight);
           }
           ctx.fillText(line, x, y + i * lineHeight);
         });
       } else {
         // Draw text stroke if enabled
-        if (layer.style?.stroke?.enabled) {
-          ctx.strokeStyle = layer.style.stroke.color;
-          ctx.lineWidth = layer.style.stroke.width;
-          ctx.strokeText(layer.content, x, y);
+        if (style.stroke?.enabled) {
+          ctx.strokeStyle = style.stroke.color;
+          ctx.lineWidth = style.stroke.width;
+          ctx.strokeText(content, x, y);
         }
-        ctx.fillText(layer.content, x, y);
+        ctx.fillText(content, x, y);
       }
 
       // Draw underline if enabled
-      if (layer.style.underline) {
-        const metrics = ctx.measureText(layer.content);
-        const underlineY = y + layer.style.fontSize * 0.1;
+      if (style.underline) {
+        const metrics = ctx.measureText(content);
+        const underlineY = y + style.fontSize * 0.1;
         ctx.beginPath();
         ctx.moveTo(x, underlineY);
         ctx.lineTo(x + metrics.width, underlineY);
-        ctx.strokeStyle = layer.style.color;
-        ctx.lineWidth = layer.style.fontSize * 0.05;
+        ctx.strokeStyle = style.color;
+        ctx.lineWidth = style.fontSize * 0.05;
         ctx.stroke();
       }
-    } else if (
-      (layer.type === 'image' || layer.type === 'sticker') &&
-      layer.imageUrl
-    ) {
+    } else {
+      // Image or sticker layer rendering
+      const { imageUrl } = layer;
       try {
         const img = await new Promise<HTMLImageElement>((resolve, reject) => {
           const image = new Image();
           image.onload = () => resolve(image);
           image.onerror = reject;
-          image.src = layer.imageUrl;
+          image.src = imageUrl;
         });
 
         ctx.drawImage(

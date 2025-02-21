@@ -34,29 +34,20 @@ import {
   useSortable,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
 
-interface LayerPanelTriggerProps {
+export interface LayerPanelTriggerProps {
   isOpen: boolean;
   onClick: () => void;
-  triggerRef: React.RefObject<HTMLButtonElement>;
 }
 
-export function LayerPanelTrigger({
-  isOpen,
-  onClick,
-  triggerRef,
-}: LayerPanelTriggerProps) {
+export function LayerPanelTrigger({ isOpen, onClick }: LayerPanelTriggerProps) {
   return (
     <Button
-      ref={triggerRef}
       variant='secondary'
       size='icon'
       onClick={onClick}
-      className={cn(
-        'rounded-full bg-background/80 backdrop-blur-sm shadow-lg hover:bg-accent transition-colors',
-        isOpen && 'bg-accent text-accent-foreground'
-      )}
+      className='rounded-full bg-background/80 backdrop-blur-sm shadow-lg hover:bg-accent'
+      title='Toggle Layer Panel'
     >
       <Layers className='h-4 w-4' />
     </Button>
@@ -191,8 +182,7 @@ interface LayerPanelProps {
   onLayerDuplicate: (layerId: string) => void;
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
-  triggerRef: React.RefObject<HTMLButtonElement>;
-  assetUrls?: { [key: string]: string };
+  assetUrls: { [key: string]: string };
 }
 
 export function LayerPanel({
@@ -205,8 +195,7 @@ export function LayerPanel({
   onLayerDuplicate,
   isOpen,
   onOpenChange,
-  triggerRef,
-  assetUrls = {},
+  assetUrls,
 }: LayerPanelProps) {
   const [activeId, setActiveId] = useState<string | null>(null);
 
@@ -254,10 +243,9 @@ export function LayerPanel({
         <LayerPanelTrigger
           isOpen={isOpen}
           onClick={() => onOpenChange(!isOpen)}
-          triggerRef={triggerRef}
         />
       </DrawerTrigger>
-      <DrawerContent className='h-full max-h-screen z-[10000]'>
+      <DrawerContent className='h-full max-h-screen z-[9000]'>
         <div className='w-full max-w-sm mx-auto'>
           <DrawerHeader>
             <DrawerTitle>Layers</DrawerTitle>

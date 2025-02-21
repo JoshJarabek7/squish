@@ -1,5 +1,7 @@
+// canvas.tsx
+
 import { useRef, useState, useEffect } from 'react';
-import { Layer } from '@/types/ProjectType';
+import { Layer, ImageLayer, StickerLayer } from '@/types/ProjectType';
 import { cn } from '@/lib/utils';
 import {
   getProjectLayers,
@@ -12,13 +14,22 @@ import { ZoomIn, ZoomOut, Move } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { compareLayersForRender } from '@/lib/utils';
+import { LayerContextMenu } from '@/components/layer-context-menu';
+import { nanoid } from 'nanoid';
+import {
+  createImageAsset,
+  createLayer,
+  updateProjectTimestamp,
+  createAction,
+} from '@/lib/db';
+import { ImageToolbar } from '@/components/image-toolbar';
 
 interface CanvasProps {
   projectId: string;
   layers: Array<{ id: string; index: number }>;
   selectedLayerId: string | null;
   onLayerSelect: (id: string | null) => void;
-  onLayerUpdate: (layer: Layer) => Promise<void>;
+  onLayerUpdate: (layer: Layer, originalLayer?: Layer) => Promise<void>;
   onLayerReorder: (layerId: string, newIndex: number) => void;
   onLayerDelete: (layerId: string) => void;
   onLayerDuplicate: (layerId: string) => void;
@@ -44,6 +55,12 @@ interface CanvasProps {
   }) => void;
   zoom?: number;
   onZoomChange?: (zoom: number) => void;
+  gridSettings: {
+    enabled: boolean;
+    columns: number;
+    rows: number;
+    showFractions: boolean;
+  };
 }
 
 interface AssetCache {
@@ -54,12 +71,39 @@ interface AssetCache {
   };
 }
 
+// Extend React CSSProperties to allow custom CSS vars like --text-stroke-width
+type CSSWithVar = React.CSSProperties & {
+  [key: `--${string}`]: string | number;
+};
+
+interface AlignmentGuide {
+  position: number;
+  type: 'horizontal' | 'vertical';
+  layerId?: string;
+  guideType:
+    | 'edge'
+    | 'center'
+    | 'size'
+    | 'grid'
+    | 'fraction'
+    | 'background'
+    | 'hidden';
+}
+
+interface ClosestGuide {
+  guide: AlignmentGuide;
+  distance: number;
+}
+
 export function Canvas({
   projectId,
   layers,
   selectedLayerId,
   onLayerSelect,
   onLayerUpdate,
+  onLayerReorder,
+  onLayerDelete,
+  onLayerDuplicate,
   showCanvasResizeHandles = true,
   className,
   onAssetDataChange,
@@ -68,9 +112,11 @@ export function Canvas({
   onBackgroundChange,
   zoom: externalZoom,
   onZoomChange,
+  gridSettings,
 }: CanvasProps) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
+
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [layerData, setLayerData] = useState<Layer[]>([]);
@@ -78,10 +124,21 @@ export function Canvas({
   const [isEraserMode, setIsEraserMode] = useState(false);
   const [eraserPath, setEraserPath] = useState<Array<[number, number]>>([]);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
+
   const [internalZoom, setInternalZoom] = useState(1);
+  const zoom = externalZoom ?? internalZoom;
+  const setZoom = (newZoom: number) => {
+    if (onZoomChange) {
+      onZoomChange(newZoom);
+    } else {
+      setInternalZoom(newZoom);
+    }
+  };
+
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [viewportOffset, setViewportOffset] = useState({ x: 0, y: 0 });
+
   const [canvasSize, setCanvasSize] = useState({ width: 1920, height: 1080 });
   const [isResizing, setIsResizing] = useState(false);
   const [resizeHandle, setResizeHandle] = useState<
@@ -92,8 +149,11 @@ export function Canvas({
     y: 0,
     width: 0,
     height: 0,
+    origX: 0,
+    origY: 0,
   });
   const [dragLayer, setDragLayer] = useState<Layer | null>(null);
+
   const [isCanvasResizing, setIsCanvasResizing] = useState(false);
   const [canvasResizeStart, setCanvasResizeStart] = useState({
     x: 0,
@@ -104,37 +164,27 @@ export function Canvas({
   const [canvasResizeHandle, setCanvasResizeHandle] = useState<
     'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw' | null
   >(null);
+
   const hasInitialCentered = useRef(false);
 
-  // Use either external or internal zoom
-  const zoom = externalZoom ?? internalZoom;
-  const setZoom = (newZoom: number) => {
-    if (onZoomChange) {
-      onZoomChange(newZoom);
-    } else {
-      setInternalZoom(newZoom);
-    }
-  };
+  const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuide[]>([]);
+  const SNAP_THRESHOLD = 5;
 
-  // Function to handle zoom changes with mouse position
+  const [isRotating, setIsRotating] = useState(false);
+  const [rotationStart, setRotationStart] = useState({ x: 0, y: 0, angle: 0 });
+
+  // Zoom with optional mouse pivot
   const handleZoom = (delta: number, clientX?: number, clientY?: number) => {
     const minZoom = 0.1;
     const maxZoom = 5;
     const newZoom = Math.min(Math.max(minZoom, zoom + delta), maxZoom);
 
     if (clientX !== undefined && clientY !== undefined && canvasRef.current) {
-      // Get the canvas rect
       const rect = canvasRef.current.getBoundingClientRect();
-
-      // Calculate the point on the canvas where we're zooming
       const x = (clientX - rect.left) / zoom;
       const y = (clientY - rect.top) / zoom;
-
-      // Calculate new offsets to keep the zoom point stationary
       const newOffsetX = x * (zoom - newZoom);
       const newOffsetY = y * (zoom - newZoom);
-
-      // Update viewport offset to maintain zoom point
       setViewportOffset((prev) => ({
         x: prev.x + newOffsetX,
         y: prev.y + newOffsetY,
@@ -144,161 +194,105 @@ export function Canvas({
     setZoom(newZoom);
   };
 
-  // Add this helper function near the top of the component
-  const logLayerOrder = (message: string) => {
-    const layerOrder = layers.map((l) => ({
-      id: l.id,
-      index: l.index,
-      type: layerData.find((ld) => ld.id === l.id)?.type,
-    }));
-
-    const renderOrder = [...layerData]
-      .sort((a, b) => {
-        const aIndex = layers.find((l) => l.id === a.id)?.index ?? 0;
-        const bIndex = layers.find((l) => l.id === b.id)?.index ?? 0;
-        return aIndex - bIndex;
-      })
-      .map((l) => ({
-        id: l.id,
-        type: l.type,
-        index: layers.find((layer) => layer.id === l.id)?.index,
-      }));
-
-    console.log(`\n=== ${message} ===`);
-    console.log('Current layers order:', layerOrder);
-    console.log('LayerData render order:', renderOrder);
-    console.log('===================\n');
-  };
-
-  // Function to center and fit canvas in viewport
+  // Center + fit
   const centerAndFitCanvas = () => {
     const workspace = workspaceRef.current;
     const canvas = canvasRef.current;
     if (!workspace || !canvas) return;
-
-    // Get the workspace dimensions
     const workspaceRect = workspace.getBoundingClientRect();
     const workspaceWidth = workspaceRect.width;
     const workspaceHeight = workspaceRect.height;
 
-    // Calculate zoom to fit canvas in viewport with padding
-    const padding = 40; // 20px padding on each side
+    const padding = 40;
     const horizontalZoom = (workspaceWidth - padding * 2) / canvasSize.width;
     const verticalZoom = (workspaceHeight - padding * 2) / canvasSize.height;
-    const newZoom = Math.min(horizontalZoom, verticalZoom, 1); // Don't zoom in past 100%
+    const newZoom = Math.min(horizontalZoom, verticalZoom, 1);
 
-    // Calculate the scaled canvas dimensions
     const scaledCanvasWidth = canvasSize.width * newZoom;
     const scaledCanvasHeight = canvasSize.height * newZoom;
 
-    // Calculate the position to center the canvas in the workspace
     const newX = Math.round((workspaceWidth - scaledCanvasWidth) / 2);
     const newY = Math.round((workspaceHeight - scaledCanvasHeight) / 2);
 
-    // Update state
     setZoom(newZoom);
     setViewportOffset({ x: newX, y: newY });
   };
 
-  // Call centerAndFitCanvas ONLY on initial project load
+  // Center once
   useEffect(() => {
     if (!hasInitialCentered.current && projectId) {
-      // Add a small delay to ensure the workspace has its final dimensions
       const timer = setTimeout(centerAndFitCanvas, 100);
       hasInitialCentered.current = true;
       return () => clearTimeout(timer);
     }
   }, [projectId]);
 
-  // Reset hasInitialCentered when project changes
   useEffect(() => {
     hasInitialCentered.current = false;
   }, [projectId]);
 
-  // Remove auto-centering from resize observer
   useEffect(() => {
     const workspace = workspaceRef.current;
     if (!workspace) return;
-
     const resizeObserver = new ResizeObserver(() => {
-      // Do nothing on resize - only manual centering is allowed
+      // no auto center on workspace resize
     });
     resizeObserver.observe(workspace);
-
     return () => {
       resizeObserver.disconnect();
     };
   }, []);
 
-  // Load layer data
+  // Load layers
   useEffect(() => {
     const loadLayers = async () => {
       try {
-        console.log('Loading layers for project:', projectId);
-        const layers = await getProjectLayers(projectId);
-        console.log('Loaded layers:', layers);
-        setLayerData(layers);
-        logLayerOrder('After loading layers');
+        const loadedLayers = await getProjectLayers(projectId);
+        setLayerData(loadedLayers);
 
-        // Initialize asset loading state while preserving existing URLs
         const newAssetData: AssetCache = { ...assetData };
-        layers
-          .filter((layer) => layer.type === 'image' || layer.type === 'sticker')
-          .forEach((layer) => {
+        loadedLayers
+          .filter((l) => l.type === 'image' || l.type === 'sticker')
+          .forEach((l) => {
             const assetId =
-              layer.type === 'image'
-                ? layer.imageAssetId
-                : layer.stickerAssetId;
-            // Only load if we don't already have a non-error URL
+              l.type === 'image' ? l.imageAssetId : l.stickerAssetId;
             if (!newAssetData[assetId] || newAssetData[assetId].error) {
               newAssetData[assetId] = {
-                url: newAssetData[assetId]?.url || '',
+                url: '',
                 loading: true,
                 error: false,
               };
             }
           });
-
-        // Update asset data in a separate effect to avoid render phase updates
         setAssetData(newAssetData);
 
-        // Load assets in parallel
-        const loadPromises = layers
-          .filter((layer) => layer.type === 'image' || layer.type === 'sticker')
-          .map(async (layer) => {
+        const loadPromises = loadedLayers
+          .filter((l) => l.type === 'image' || l.type === 'sticker')
+          .map(async (l) => {
             const assetId =
-              layer.type === 'image'
-                ? layer.imageAssetId
-                : layer.stickerAssetId;
-
-            // Skip if we already have a valid URL
+              l.type === 'image' ? l.imageAssetId : l.stickerAssetId;
+            // skip if we have a good url
             if (newAssetData[assetId]?.url && !newAssetData[assetId].error) {
               return;
             }
-
             try {
-              const data = await (layer.type === 'image'
+              const data = await (l.type === 'image'
                 ? getImageAssetData(assetId)
                 : getStickerAssetData(assetId));
-
               const binaryData = data instanceof Uint8Array ? data : data.data;
               const mimeType =
                 data instanceof Uint8Array ? 'image/png' : data.mimeType;
-
               const blob = new Blob([binaryData], { type: mimeType });
 
-              // Clean up old URL if it exists
               if (newAssetData[assetId]?.url) {
                 URL.revokeObjectURL(newAssetData[assetId].url);
               }
-
               const url = URL.createObjectURL(blob);
               setAssetData((prev) => ({
                 ...prev,
                 [assetId]: { url, loading: false, error: false },
               }));
-            } catch (error) {
-              console.error(`Failed to load asset ${assetId}:`, error);
+            } catch {
               setAssetData((prev) => ({
                 ...prev,
                 [assetId]: {
@@ -309,23 +303,20 @@ export function Canvas({
               }));
             }
           });
-
         await Promise.all(loadPromises);
-      } catch (error) {
-        console.error('Failed to load layers:', error);
+      } catch {
         toast.error('Failed to load layers');
       }
     };
 
     loadLayers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, canvasSettingsVersion]);
 
-  // Effect to sync asset data changes with parent
   useEffect(() => {
     onAssetDataChange?.(assetData);
   }, [assetData, onAssetDataChange]);
 
-  // Cleanup URLs when component unmounts
   useEffect(() => {
     return () => {
       Object.values(assetData).forEach((asset) => {
@@ -334,38 +325,20 @@ export function Canvas({
         }
       });
     };
-  }, []);
+  }, [assetData]);
 
-  // Load canvas settings including background
+  // Load canvas settings
   useEffect(() => {
-    const loadCanvasSettings = async () => {
+    const loadCanvasSettingsData = async () => {
       try {
         const settings = await getCanvasSettings(projectId);
-        setCanvasSize({
-          width: settings.width,
-          height: settings.height,
-        });
+        setCanvasSize({ width: settings.width, height: settings.height });
 
-        // Load background settings
         if (settings.backgroundType === 'image' && settings.backgroundImageId) {
           try {
             const imageData = await getImageAssetData(
               settings.backgroundImageId
             );
-
-            // Create a new Image to ensure it's loaded before creating the blob URL
-            const img = new Image();
-            const loadPromise = new Promise<{ width: number; height: number }>(
-              (resolve, reject) => {
-                img.onload = () =>
-                  resolve({
-                    width: img.naturalWidth,
-                    height: img.naturalHeight,
-                  });
-                img.onerror = reject;
-              }
-            );
-
             const blob = new Blob(
               [imageData instanceof Uint8Array ? imageData : imageData.data],
               {
@@ -376,12 +349,21 @@ export function Canvas({
               }
             );
             const imageUrl = URL.createObjectURL(blob);
+
+            const img = new Image();
+            const imgLoaded = new Promise<{ width: number; height: number }>(
+              (resolve, reject) => {
+                img.onload = () =>
+                  resolve({
+                    width: img.naturalWidth,
+                    height: img.naturalHeight,
+                  });
+                img.onerror = reject;
+              }
+            );
             img.src = imageUrl;
+            const imageSize = await imgLoaded;
 
-            // Wait for image to load and get its dimensions
-            const imageSize = await loadPromise;
-
-            // Clean up old background image URL if it exists
             if (
               canvasBackground.type === 'image' &&
               canvasBackground.imageUrl
@@ -395,8 +377,7 @@ export function Canvas({
               imageUrl,
               imageSize,
             });
-          } catch (error) {
-            console.error('Failed to load background image:', error);
+          } catch {
             onBackgroundChange({ type: 'none' });
           }
         } else if (
@@ -410,14 +391,14 @@ export function Canvas({
         } else {
           onBackgroundChange({ type: 'none' });
         }
-      } catch (error) {
-        console.error('Failed to load canvas settings:', error);
+      } catch {
+        // ignore load errors
       }
     };
-    loadCanvasSettings();
+    loadCanvasSettingsData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, canvasSettingsVersion]);
 
-  // Clean up background image URL on unmount or when changing
   useEffect(() => {
     const currentUrl =
       canvasBackground.type === 'image' ? canvasBackground.imageUrl : null;
@@ -428,174 +409,215 @@ export function Canvas({
     };
   }, [canvasBackground.type, canvasBackground.imageUrl]);
 
-  // Handle layer selection
+  // Layer click
   const handleLayerClick = (e: React.MouseEvent, layerId: string) => {
     e.stopPropagation();
-    // Don't change selection if we're editing text
-    if (editingTextId) {
-      return;
-    }
+    if (editingTextId) return;
     onLayerSelect(layerId);
   };
 
-  // Handle layer dragging
+  // Drag
   const handleMouseDown = (e: React.MouseEvent, layer: Layer) => {
-    if (editingTextId === layer.id) return; // Don't start drag while editing text
+    if (e.button !== 0) return;
+    if (editingTextId === layer.id) return;
     if (layer.id !== selectedLayerId || isResizing || isPanning) return;
-    if (isResizing) return; // Explicitly prevent drag during resize
-
     e.stopPropagation();
     e.preventDefault();
-    console.log('Starting drag for layer:', layer.id);
 
     setIsDragging(true);
     setDragLayer(layer);
 
-    // Get canvas rect for coordinate conversion
     const canvasRect = canvasRef.current?.getBoundingClientRect();
     if (!canvasRect) return;
-
-    // Calculate mouse position relative to the canvas, accounting for zoom and pan
     const mouseX = (e.clientX - canvasRect.left) / zoom;
     const mouseY = (e.clientY - canvasRect.top) / zoom;
-
     setDragStart({
       x: mouseX - layer.transform.x,
       y: mouseY - layer.transform.y,
     });
   };
 
-  // Handle mouse move during drag
   useEffect(() => {
     if (!isDragging || !dragLayer) return;
 
-    const handleMouseMove = (e: MouseEvent) => {
+    const onMouseMove = (e: MouseEvent) => {
       const canvasRect = canvasRef.current?.getBoundingClientRect();
       if (!canvasRect) return;
-
-      // Calculate new position relative to the canvas, accounting for zoom and pan
       const mouseX = (e.clientX - canvasRect.left) / zoom;
       const mouseY = (e.clientY - canvasRect.top) / zoom;
 
-      const newX = mouseX - dragStart.x;
-      const newY = mouseY - dragStart.y;
+      let newX = mouseX - dragStart.x;
+      let newY = mouseY - dragStart.y;
 
-      // Update local state immediately for smooth dragging
+      // alignment
+      const guides = calculateAlignmentGuides(
+        {
+          ...dragLayer,
+          transform: { ...dragLayer.transform, x: newX, y: newY },
+        },
+        dragLayer.id
+      );
+
+      const leftGuide = findClosestGuide(newX, guides, 'vertical');
+      const rightGuide = findClosestGuide(
+        newX + dragLayer.transform.width,
+        guides,
+        'vertical'
+      );
+      const centerXGuide = findClosestGuide(
+        newX + dragLayer.transform.width / 2,
+        guides,
+        'vertical'
+      );
+      const topGuide = findClosestGuide(newY, guides, 'horizontal');
+      const bottomGuide = findClosestGuide(
+        newY + dragLayer.transform.height,
+        guides,
+        'horizontal'
+      );
+      const centerYGuide = findClosestGuide(
+        newY + dragLayer.transform.height / 2,
+        guides,
+        'horizontal'
+      );
+
+      if (leftGuide) {
+        newX = leftGuide.guide.position;
+      } else if (rightGuide) {
+        newX = rightGuide.guide.position - dragLayer.transform.width;
+      } else if (centerXGuide) {
+        newX = centerXGuide.guide.position - dragLayer.transform.width / 2;
+      }
+
+      if (topGuide) {
+        newY = topGuide.guide.position;
+      } else if (bottomGuide) {
+        newY = bottomGuide.guide.position - dragLayer.transform.height;
+      } else if (centerYGuide) {
+        newY = centerYGuide.guide.position - dragLayer.transform.height / 2;
+      }
+
+      // Collect guides carefully
+      const alignmentTemp: AlignmentGuide[] = [];
+      if (leftGuide?.guide) alignmentTemp.push(leftGuide.guide);
+      if (rightGuide?.guide) alignmentTemp.push(rightGuide.guide);
+      if (centerXGuide?.guide) alignmentTemp.push(centerXGuide.guide);
+      if (topGuide?.guide) alignmentTemp.push(topGuide.guide);
+      if (bottomGuide?.guide) alignmentTemp.push(bottomGuide.guide);
+      if (centerYGuide?.guide) alignmentTemp.push(centerYGuide.guide);
+      setAlignmentGuides(alignmentTemp);
+
       setLayerData((prev) =>
         prev.map((l) =>
           l.id === dragLayer.id
-            ? {
-                ...l,
-                transform: {
-                  ...l.transform,
-                  x: newX,
-                  y: newY,
-                },
-              }
+            ? { ...l, transform: { ...l.transform, x: newX, y: newY } }
             : l
         )
       );
     };
 
-    const handleMouseUp = () => {
-      console.log('Ending drag for layer:', dragLayer.id);
-
-      // Get the final position and update the database
+    const onMouseUp = () => {
       const layer = layerData.find((l) => l.id === dragLayer.id);
       if (layer) {
-        // Just update directly, let the DatabaseQueue handle serialization
-        void onLayerUpdate(layer);
+        const originalLayer = { ...dragLayer };
+        const updatedLayer = { ...layer };
+        if (
+          originalLayer.transform.x !== updatedLayer.transform.x ||
+          originalLayer.transform.y !== updatedLayer.transform.y
+        ) {
+          void onLayerUpdate(updatedLayer, originalLayer);
+        }
       }
 
       setIsDragging(false);
       setDragLayer(null);
+      setAlignmentGuides([]);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
     };
   }, [isDragging, dragLayer, dragStart, zoom, layerData, onLayerUpdate]);
 
-  // Handle keyboard controls for selected layer
+  // Keyboard
   useEffect(() => {
     if (!selectedLayerId) return;
-
     const handleKeyDown = (e: KeyboardEvent) => {
       const layer = layerData.find((l) => l.id === selectedLayerId);
       if (!layer) return;
+      if (editingTextId === layer.id) return;
 
-      const MOVE_AMOUNT = 1;
-      const ROTATE_AMOUNT = 1;
-      const SCALE_AMOUNT = 0.01;
-      const OPACITY_AMOUNT = 0.05;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        onLayerDelete(layer.id);
+        return;
+      }
 
-      let newTransform = { ...layer.transform };
+      const MOVE = 1;
+      const ROTATE = 1;
+      const SCALE = 0.01;
+      const OPACITY = 0.05;
+
+      const newT = { ...layer.transform };
 
       switch (e.key) {
         case 'ArrowLeft':
-          newTransform.x -= MOVE_AMOUNT;
+          newT.x -= MOVE;
           break;
         case 'ArrowRight':
-          newTransform.x += MOVE_AMOUNT;
+          newT.x += MOVE;
           break;
         case 'ArrowUp':
-          newTransform.y -= MOVE_AMOUNT;
+          newT.y -= MOVE;
           break;
         case 'ArrowDown':
-          newTransform.y += MOVE_AMOUNT;
+          newT.y += MOVE;
           break;
         case 'r':
-          newTransform.rotation += ROTATE_AMOUNT;
+          newT.rotation += ROTATE;
           break;
         case 'R':
-          newTransform.rotation -= ROTATE_AMOUNT;
+          newT.rotation -= ROTATE;
           break;
         case '+':
-          newTransform.scaleX += SCALE_AMOUNT;
-          newTransform.scaleY += SCALE_AMOUNT;
+          newT.scaleX += SCALE;
+          newT.scaleY += SCALE;
           break;
         case '-':
-          newTransform.scaleX -= SCALE_AMOUNT;
-          newTransform.scaleY -= SCALE_AMOUNT;
+          newT.scaleX -= SCALE;
+          newT.scaleY -= SCALE;
           break;
         case '[':
-          newTransform.opacity = Math.max(
-            0,
-            newTransform.opacity - OPACITY_AMOUNT
-          );
+          newT.opacity = Math.max(0, newT.opacity - OPACITY);
           break;
         case ']':
-          newTransform.opacity = Math.min(
-            1,
-            newTransform.opacity + OPACITY_AMOUNT
-          );
+          newT.opacity = Math.min(1, newT.opacity + OPACITY);
           break;
         default:
           return;
       }
 
-      onLayerUpdate({
-        ...layer,
-        transform: newTransform,
-      });
+      onLayerUpdate({ ...layer, transform: newT });
     };
-
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedLayerId, layerData, onLayerUpdate]);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [selectedLayerId, layerData, onLayerUpdate, editingTextId, onLayerDelete]);
 
+  // Text double-click
   const handleTextDoubleClick = (e: React.MouseEvent, layer: Layer) => {
     if (layer.type !== 'text') return;
     e.stopPropagation();
-    e.preventDefault(); // Prevent any drag start
+    e.preventDefault();
     setEditingTextId(layer.id);
     onLayerSelect(layer.id);
   };
 
+  // Content editable
   const handleContentEditableChange = (
     e: React.FormEvent<HTMLDivElement>,
     layer: Layer
@@ -603,15 +625,11 @@ export function Canvas({
     if (layer.type !== 'text') return;
     const newContent = e.currentTarget.textContent ?? '';
     if (newContent !== layer.content) {
-      onLayerUpdate({
-        ...layer,
-        content: newContent,
-      });
+      onLayerUpdate({ ...layer, content: newContent });
     }
   };
 
   const handleTextBlur = (e: React.FocusEvent) => {
-    // Prevent blur if clicking within the toolbar or on elements marked with data-ignore-blur
     const relatedTarget = e.relatedTarget as HTMLElement;
     if (
       relatedTarget &&
@@ -624,16 +642,15 @@ export function Canvas({
     setEditingTextId(null);
   };
 
+  // Resizing
   const handleResizeStart = (
     e: React.MouseEvent,
     handle: 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
   ) => {
     if (!selectedLayerId) return;
-
     e.stopPropagation();
     e.preventDefault();
 
-    // Make sure we're not dragging
     if (isDragging) {
       setIsDragging(false);
       setDragLayer(null);
@@ -649,542 +666,1318 @@ export function Canvas({
       y: e.clientY,
       width: layer.transform.width,
       height: layer.transform.height,
+      origX: layer.transform.x,
+      origY: layer.transform.y,
     });
   };
 
-  // Update the calculateScaledDimensions function
-  const calculateScaledDimensions = (
+  const handleResizeEnd = () => {
+    if (isResizing && selectedLayerId) {
+      const layer = layerData.find((l) => l.id === selectedLayerId);
+      if (layer) {
+        onLayerUpdate(layer);
+      }
+    }
+    setIsResizing(false);
+    setResizeHandle(null);
+    setAlignmentGuides([]);
+  };
+
+  // Helper to scale background images properly
+  function calculateScaledDimensions(
     imageWidth: number,
     imageHeight: number,
     canvasWidth: number,
     canvasHeight: number
-  ) => {
-    const imageAspectRatio = imageWidth / imageHeight;
-    const canvasAspectRatio = canvasWidth / canvasHeight;
-
+  ) {
+    const imageAsp = imageWidth / imageHeight;
+    const canvasAsp = canvasWidth / canvasHeight;
     let scaledWidth: number;
     let scaledHeight: number;
 
-    // Scale to cover the canvas while maintaining aspect ratio
-    if (imageAspectRatio > canvasAspectRatio) {
-      // Image is wider than canvas (relative to height)
+    if (imageAsp > canvasAsp) {
       scaledHeight = canvasHeight;
-      scaledWidth = canvasHeight * imageAspectRatio;
+      scaledWidth = canvasHeight * imageAsp;
     } else {
-      // Image is taller than canvas (relative to width)
       scaledWidth = canvasWidth;
-      scaledHeight = canvasWidth / imageAspectRatio;
+      scaledHeight = canvasWidth / imageAsp;
     }
-
-    // Center the image
     const x = (canvasWidth - scaledWidth) / 2;
     const y = (canvasHeight - scaledHeight) / 2;
-
     return { width: scaledWidth, height: scaledHeight, x, y };
+  }
+
+  // For snapping
+  function findClosestGuide(
+    value: number,
+    guides: AlignmentGuide[],
+    type: 'horizontal' | 'vertical'
+  ): ClosestGuide | null {
+    let closestGuide: AlignmentGuide | null = null;
+    let minDistance = SNAP_THRESHOLD;
+    for (const g of guides) {
+      if (g.type !== type) continue;
+      const dist = Math.abs(g.position - value);
+      if (dist < minDistance) {
+        minDistance = dist;
+        closestGuide = g;
+      }
+    }
+    return closestGuide ? { guide: closestGuide, distance: minDistance } : null;
+  }
+
+  const calculateAlignmentGuides = (
+    activeLayer: Layer,
+    skipLayerId?: string
+  ): AlignmentGuide[] => {
+    const guides: AlignmentGuide[] = [];
+    const activeLeft = activeLayer.transform.x;
+    const activeRight = activeLeft + activeLayer.transform.width;
+    const activeTop = activeLayer.transform.y;
+    const activeBottom = activeTop + activeLayer.transform.height;
+    const activeCenterX = activeLeft + activeLayer.transform.width / 2;
+    const activeCenterY = activeTop + activeLayer.transform.height / 2;
+
+    // Canvas edges
+    guides.push(
+      { position: 0, type: 'vertical', guideType: 'edge' },
+      { position: canvasSize.width, type: 'vertical', guideType: 'edge' },
+      { position: 0, type: 'horizontal', guideType: 'edge' },
+      { position: canvasSize.height, type: 'horizontal', guideType: 'edge' }
+    );
+
+    // Canvas center - also check if active layer center aligns with canvas center
+    const canvasCenterX = canvasSize.width / 2;
+    const canvasCenterY = canvasSize.height / 2;
+
+    if (Math.abs(activeCenterX - canvasCenterX) < SNAP_THRESHOLD) {
+      guides.push({
+        position: canvasCenterX,
+        type: 'vertical',
+        guideType: 'center',
+      });
+    }
+    if (Math.abs(activeCenterY - canvasCenterY) < SNAP_THRESHOLD) {
+      guides.push({
+        position: canvasCenterY,
+        type: 'horizontal',
+        guideType: 'center',
+      });
+    }
+
+    // Grid
+    if (gridSettings.enabled) {
+      const colWidth = canvasSize.width / gridSettings.columns;
+      for (let i = 1; i < gridSettings.columns; i++) {
+        guides.push({
+          position: colWidth * i,
+          type: 'vertical',
+          guideType: 'grid',
+        });
+      }
+      const rowHeight = canvasSize.height / gridSettings.rows;
+      for (let i = 1; i < gridSettings.rows; i++) {
+        guides.push({
+          position: rowHeight * i,
+          type: 'horizontal',
+          guideType: 'grid',
+        });
+      }
+      if (gridSettings.showFractions) {
+        [1 / 3, 2 / 3].forEach((f) => {
+          guides.push(
+            {
+              position: canvasSize.width * f,
+              type: 'vertical',
+              guideType: 'fraction',
+            },
+            {
+              position: canvasSize.height * f,
+              type: 'horizontal',
+              guideType: 'fraction',
+            }
+          );
+        });
+        [1 / 4, 3 / 4].forEach((f) => {
+          guides.push(
+            {
+              position: canvasSize.width * f,
+              type: 'vertical',
+              guideType: 'fraction',
+            },
+            {
+              position: canvasSize.height * f,
+              type: 'horizontal',
+              guideType: 'fraction',
+            }
+          );
+        });
+      }
+    }
+
+    // Background image
+    if (canvasBackground.type === 'image' && canvasBackground.imageSize) {
+      const scaled = calculateScaledDimensions(
+        canvasBackground.imageSize.width,
+        canvasBackground.imageSize.height,
+        canvasSize.width,
+        canvasSize.height
+      );
+      guides.push(
+        { position: scaled.x, type: 'vertical', guideType: 'background' },
+        {
+          position: scaled.x + scaled.width,
+          type: 'vertical',
+          guideType: 'background',
+        },
+        { position: scaled.y, type: 'horizontal', guideType: 'background' },
+        {
+          position: scaled.y + scaled.height,
+          type: 'horizontal',
+          guideType: 'background',
+        },
+        {
+          position: scaled.x + scaled.width / 2,
+          type: 'vertical',
+          guideType: 'background',
+        },
+        {
+          position: scaled.y + scaled.height / 2,
+          type: 'horizontal',
+          guideType: 'background',
+        }
+      );
+    }
+
+    // Other layers
+    layerData.forEach((other) => {
+      if (other.id === skipLayerId) return;
+      const left = other.transform.x;
+      const right = left + other.transform.width;
+      const top = other.transform.y;
+      const bottom = top + other.transform.height;
+      const centerX = left + other.transform.width / 2;
+      const centerY = top + other.transform.height / 2;
+      const width = other.transform.width;
+      const height = other.transform.height;
+
+      guides.push(
+        {
+          position: left,
+          type: 'vertical',
+          layerId: other.id,
+          guideType:
+            Math.abs(activeLeft - left) < SNAP_THRESHOLD ? 'edge' : 'hidden',
+        },
+        {
+          position: right,
+          type: 'vertical',
+          layerId: other.id,
+          guideType:
+            Math.abs(activeRight - right) < SNAP_THRESHOLD ? 'edge' : 'hidden',
+        },
+        {
+          position: top,
+          type: 'horizontal',
+          layerId: other.id,
+          guideType:
+            Math.abs(activeTop - top) < SNAP_THRESHOLD ? 'edge' : 'hidden',
+        },
+        {
+          position: bottom,
+          type: 'horizontal',
+          layerId: other.id,
+          guideType:
+            Math.abs(activeBottom - bottom) < SNAP_THRESHOLD
+              ? 'edge'
+              : 'hidden',
+        },
+        {
+          position: centerX,
+          type: 'vertical',
+          layerId: other.id,
+          guideType:
+            Math.abs(activeCenterX - centerX) < SNAP_THRESHOLD
+              ? 'center'
+              : 'hidden',
+        },
+        {
+          position: centerY,
+          type: 'horizontal',
+          layerId: other.id,
+          guideType:
+            Math.abs(activeCenterY - centerY) < SNAP_THRESHOLD
+              ? 'center'
+              : 'hidden',
+        }
+      );
+
+      // Size matching
+      if (Math.abs(activeLayer.transform.width - width) < SNAP_THRESHOLD) {
+        guides.push({
+          position: width,
+          type: 'vertical',
+          layerId: other.id,
+          guideType: 'size',
+        });
+      }
+      if (Math.abs(height - activeLayer.transform.height) < SNAP_THRESHOLD) {
+        guides.push({
+          position: height,
+          type: 'horizontal',
+          layerId: other.id,
+          guideType: 'size',
+        });
+      }
+    });
+
+    return guides;
+  };
+
+  const renderAlignmentGuides = () => {
+    return alignmentGuides.map((g, idx) => {
+      const style = {
+        position: 'absolute' as const,
+        backgroundColor: (() => {
+          switch (g.guideType) {
+            case 'size':
+              return '#00ff00';
+            case 'grid':
+              return 'rgba(128, 128, 255, 0.5)';
+            case 'fraction':
+              return 'rgba(128, 128, 255, 0.3)';
+            case 'background':
+              return 'rgba(255, 128, 0, 0.5)';
+            default:
+              return '#ff0000'; // edge/center
+          }
+        })(),
+        pointerEvents: 'none' as const,
+        zIndex: 9999,
+        ...(g.type === 'vertical'
+          ? {
+              left: `${g.position}px`,
+              top: 0,
+              width:
+                g.guideType === 'grid' || g.guideType === 'fraction'
+                  ? '0.5px'
+                  : '1px',
+              height: '100%',
+            }
+          : {
+              top: `${g.position}px`,
+              left: 0,
+              height:
+                g.guideType === 'grid' || g.guideType === 'fraction'
+                  ? '0.5px'
+                  : '1px',
+              width: '100%',
+            }),
+      };
+      return <div key={`${g.type}-${idx}`} style={style} />;
+    });
+  };
+
+  // Rotation
+  const calculateAngle = (cx: number, cy: number, ex: number, ey: number) => {
+    const dx = ex - cx;
+    const dy = ey - cy;
+    let theta = Math.atan2(dy, dx);
+    theta *= 180 / Math.PI;
+    return theta;
+  };
+
+  const snapAngle = (angle: number, interval = 45) => {
+    return Math.round(angle / interval) * interval;
+  };
+
+  const handleRotationStart = (e: React.MouseEvent, layer: Layer) => {
+    if (layer.id !== selectedLayerId || isResizing || isPanning) return;
+    e.stopPropagation();
+    e.preventDefault();
+    setIsRotating(true);
+
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const centerX =
+      (layer.transform.x + layer.transform.width / 2) * zoom + rect.left;
+    const centerY =
+      (layer.transform.y + layer.transform.height / 2) * zoom + rect.top;
+
+    const currentAngle = calculateAngle(centerX, centerY, e.clientX, e.clientY);
+    setRotationStart({
+      x: centerX,
+      y: centerY,
+      angle: currentAngle - (layer.transform.rotation || 0),
+    });
+  };
+
+  useEffect(() => {
+    if (!isRotating || !selectedLayerId) return;
+
+    const handleRotationMove = (e: MouseEvent) => {
+      const layer = layerData.find((l) => l.id === selectedLayerId);
+      if (!layer) return;
+
+      const currentAngle = calculateAngle(
+        rotationStart.x,
+        rotationStart.y,
+        e.clientX,
+        e.clientY
+      );
+
+      let newRotation = currentAngle - rotationStart.angle;
+      if (e.shiftKey) {
+        newRotation = snapAngle(newRotation);
+      }
+
+      setLayerData((prev) =>
+        prev.map((l) =>
+          l.id === selectedLayerId
+            ? {
+                ...l,
+                transform: {
+                  ...l.transform,
+                  rotation: newRotation,
+                },
+              }
+            : l
+        )
+      );
+    };
+
+    const handleRotationEnd = () => {
+      const layer = layerData.find((l) => l.id === selectedLayerId);
+      if (layer) {
+        onLayerUpdate(layer);
+      }
+      setIsRotating(false);
+    };
+
+    window.addEventListener('mousemove', handleRotationMove);
+    window.addEventListener('mouseup', handleRotationEnd);
+
+    return () => {
+      window.removeEventListener('mousemove', handleRotationMove);
+      window.removeEventListener('mouseup', handleRotationEnd);
+    };
+  }, [
+    isRotating,
+    selectedLayerId,
+    rotationStart,
+    layerData,
+    zoom,
+    onLayerUpdate,
+  ]);
+
+  // Actual resizing
+  useEffect(() => {
+    if (!isResizing || !resizeHandle || !selectedLayerId) return;
+
+    const handleResizeMove = (e: MouseEvent) => {
+      const layer = layerData.find((l) => l.id === selectedLayerId);
+      if (!layer) return;
+
+      const deltaX = (e.clientX - resizeStart.x) / zoom;
+      const deltaY = (e.clientY - resizeStart.y) / zoom;
+
+      const {
+        origX: startX,
+        origY: startY,
+        width: startWidth,
+        height: startHeight,
+      } = resizeStart;
+      const { scaleX = 1, scaleY = 1 } = layer.transform;
+      const isFlippedX = scaleX < 0;
+      const isFlippedY = scaleY < 0;
+
+      // We'll keep these as positive bounding-box width/height
+      let newWidth = startWidth;
+      let newHeight = startHeight;
+      let newX = startX;
+      let newY = startY;
+
+      // Decide which edges we're resizing based on the handle
+      const resizingNorth = resizeHandle.includes('n');
+      const resizingSouth = resizeHandle.includes('s');
+      const resizingEast = resizeHandle.includes('e');
+      const resizingWest = resizeHandle.includes('w');
+
+      const MIN_SIZE = 20;
+      const shouldMaintainAspectRatio =
+        layer.type === 'image' || layer.type === 'sticker' || e.shiftKey;
+      const aspect = startWidth / startHeight;
+
+      // Handle horizontal resizing
+      if (resizingEast) {
+        // When resizing from the east edge, adjust width based on drag delta
+        const delta = deltaX;
+        newWidth = Math.max(
+          MIN_SIZE,
+          startWidth + (isFlippedX ? delta : delta)
+        );
+      } else if (resizingWest) {
+        // When resizing from the west edge, adjust width and shift x to maintain right edge
+        const delta = deltaX;
+        const updatedWidth = Math.max(
+          MIN_SIZE,
+          startWidth - (isFlippedX ? delta : delta)
+        );
+        newX = startX + (startWidth - updatedWidth);
+        newWidth = updatedWidth;
+      }
+
+      // Handle vertical resizing
+      if (resizingSouth) {
+        // When resizing from the south edge, adjust height based on drag delta
+        const delta = deltaY;
+        newHeight = Math.max(
+          MIN_SIZE,
+          startHeight + (isFlippedY ? delta : delta)
+        );
+      } else if (resizingNorth) {
+        // When resizing from the north edge, adjust height and shift y to maintain bottom edge
+        const delta = deltaY;
+        const updatedHeight = Math.max(
+          MIN_SIZE,
+          startHeight - (isFlippedY ? delta : delta)
+        );
+        newY = startY + (startHeight - updatedHeight);
+        newHeight = updatedHeight;
+      }
+
+      // Maintain aspect ratio if needed
+      if (
+        shouldMaintainAspectRatio &&
+        (resizingNorth || resizingSouth || resizingEast || resizingWest)
+      ) {
+        if (resizingEast || resizingWest) {
+          // If resizing horizontally, adjust height based on width
+          newHeight = newWidth / aspect;
+          if (resizingNorth) {
+            newY = startY + (startHeight - newHeight);
+          }
+        } else {
+          // If resizing vertically, adjust width based on height
+          newWidth = newHeight * aspect;
+          if (resizingWest) {
+            newX = startX + (startWidth - newWidth);
+          }
+        }
+      }
+
+      // Calculate potential guides for the current layer
+      const guides = calculateAlignmentGuides(
+        {
+          ...layer,
+          transform: {
+            ...layer.transform,
+            x: newX,
+            y: newY,
+            width: newWidth,
+            height: newHeight,
+          },
+        },
+        layer.id
+      );
+
+      // Find closest guides
+      const leftGuide = findClosestGuide(newX, guides, 'vertical');
+      const rightGuide = findClosestGuide(newX + newWidth, guides, 'vertical');
+      const topGuide = findClosestGuide(newY, guides, 'horizontal');
+      const bottomGuide = findClosestGuide(
+        newY + newHeight,
+        guides,
+        'horizontal'
+      );
+      const widthGuide = findClosestGuide(newWidth, guides, 'vertical');
+      const heightGuide = findClosestGuide(newHeight, guides, 'horizontal');
+
+      // Apply snapping
+      if (resizingWest && leftGuide) {
+        const oldRight = newX + newWidth;
+        newX = leftGuide.guide.position;
+        newWidth = oldRight - newX;
+      } else if (resizingEast && rightGuide) {
+        newWidth = rightGuide.guide.position - newX;
+      }
+
+      if (resizingNorth && topGuide) {
+        const oldBottom = newY + newHeight;
+        newY = topGuide.guide.position;
+        newHeight = oldBottom - newY;
+      } else if (resizingSouth && bottomGuide) {
+        newHeight = bottomGuide.guide.position - newY;
+      }
+
+      if (widthGuide && !shouldMaintainAspectRatio) {
+        newWidth = widthGuide.guide.position;
+      }
+      if (heightGuide && !shouldMaintainAspectRatio) {
+        newHeight = heightGuide.guide.position;
+      }
+
+      // Update alignment guides
+      setAlignmentGuides(
+        [
+          leftGuide?.guide,
+          rightGuide?.guide,
+          topGuide?.guide,
+          bottomGuide?.guide,
+          widthGuide?.guide,
+          heightGuide?.guide,
+        ].filter((guide): guide is AlignmentGuide => guide !== undefined)
+      );
+
+      // Ensure dimensions stay within bounds
+      const maxW = canvasSize.width * 5;
+      const maxH = canvasSize.height * 5;
+      newWidth = Math.min(maxW, Math.max(MIN_SIZE, newWidth));
+      newHeight = Math.min(maxH, Math.max(MIN_SIZE, newHeight));
+
+      // Update layer with new dimensions
+      setLayerData((prev) =>
+        prev.map((l) =>
+          l.id === selectedLayerId
+            ? {
+                ...l,
+                transform: {
+                  ...l.transform,
+                  x: newX,
+                  y: newY,
+                  width: newWidth,
+                  height: newHeight,
+                },
+              }
+            : l
+        )
+      );
+    };
+
+    const handleMouseUp = () => {
+      handleResizeEnd();
+    };
+
+    window.addEventListener('mousemove', handleResizeMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleResizeMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing, resizeHandle, resizeStart, zoom, selectedLayerId, layerData]);
+
+  // Canvas resizing
+  const handleCanvasResizeStart = (
+    e: React.MouseEvent<HTMLDivElement>,
+    handle: 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
+  ) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setIsCanvasResizing(true);
+    setCanvasResizeHandle(handle);
+    setCanvasResizeStart({
+      x: e.clientX,
+      y: e.clientY,
+      width: canvasSize.width,
+      height: canvasSize.height,
+    });
+  };
+
+  const handleCanvasResizeMove = (e: MouseEvent | React.MouseEvent) => {
+    if (!isCanvasResizing || !canvasResizeHandle) return;
+    const deltaX = (e.clientX - canvasResizeStart.x) / zoom;
+    const deltaY = (e.clientY - canvasResizeStart.y) / zoom;
+    let newWidth = canvasResizeStart.width;
+    let newHeight = canvasResizeStart.height;
+
+    let newX = viewportOffset.x;
+    let newY = viewportOffset.y;
+
+    const MIN_SIZE = 320;
+    const MAX_SIZE = 4096;
+
+    if (canvasResizeHandle.includes('e')) {
+      newWidth = Math.min(
+        MAX_SIZE,
+        Math.max(MIN_SIZE, canvasResizeStart.width + deltaX)
+      );
+    } else if (canvasResizeHandle.includes('w')) {
+      const wDelta = deltaX;
+      newWidth = Math.min(
+        MAX_SIZE,
+        Math.max(MIN_SIZE, canvasResizeStart.width - wDelta)
+      );
+      if (newWidth !== canvasResizeStart.width) {
+        newX = viewportOffset.x + (canvasResizeStart.width - newWidth) * zoom;
+      }
+    }
+
+    if (canvasResizeHandle.includes('s')) {
+      newHeight = Math.min(
+        MAX_SIZE,
+        Math.max(MIN_SIZE, canvasResizeStart.height + deltaY)
+      );
+    } else if (canvasResizeHandle.includes('n')) {
+      const hDelta = deltaY;
+      newHeight = Math.min(
+        MAX_SIZE,
+        Math.max(MIN_SIZE, canvasResizeStart.height - hDelta)
+      );
+      if (newHeight !== canvasResizeStart.height) {
+        newY = viewportOffset.y + (canvasResizeStart.height - newHeight) * zoom;
+      }
+    }
+
+    // aspect ratio if SHIFT + corner
+    if (
+      canvasResizeHandle.length === 2 &&
+      e instanceof MouseEvent &&
+      e.shiftKey
+    ) {
+      const aspect = canvasResizeStart.width / canvasResizeStart.height;
+      if (Math.abs(deltaX) > Math.abs(deltaY)) {
+        newHeight = newWidth / aspect;
+      } else {
+        newWidth = newHeight * aspect;
+      }
+      newWidth = Math.round(Math.min(MAX_SIZE, Math.max(MIN_SIZE, newWidth)));
+      newHeight = Math.round(Math.min(MAX_SIZE, Math.max(MIN_SIZE, newHeight)));
+    }
+
+    newWidth = Math.round(Math.min(MAX_SIZE, Math.max(MIN_SIZE, newWidth)));
+    newHeight = Math.round(Math.min(MAX_SIZE, Math.max(MIN_SIZE, newHeight)));
+    setCanvasSize({ width: newWidth, height: newHeight });
+
+    if (canvasResizeHandle.includes('w') || canvasResizeHandle.includes('n')) {
+      setViewportOffset({ x: newX, y: newY });
+    }
+  };
+
+  const handleCanvasResizeEnd = async () => {
+    if (isCanvasResizing) {
+      try {
+        const width = Math.round(canvasSize.width);
+        const height = Math.round(canvasSize.height);
+        await updateCanvasSettings(projectId, { width, height });
+        setCanvasSize({ width, height });
+      } catch {
+        toast.error('Failed to save canvas size');
+      }
+    }
+    setIsCanvasResizing(false);
+    setCanvasResizeHandle(null);
+  };
+
+  useEffect(() => {
+    if (!isCanvasResizing) return;
+    const onMouseMove = (e: MouseEvent) => handleCanvasResizeMove(e);
+    const onMouseUp = () => handleCanvasResizeEnd();
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [isCanvasResizing, canvasResizeHandle, canvasResizeStart, zoom]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey) {
+        switch (e.key) {
+          case '=':
+          case '+':
+            e.preventDefault();
+            handleZoom(0.1);
+            break;
+          case '-':
+          case '_':
+            e.preventDefault();
+            handleZoom(-0.1);
+            break;
+          case '0':
+            e.preventDefault();
+            centerAndFitCanvas();
+            break;
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => {
+      window.removeEventListener('keydown', handleKey);
+    };
+  }, [zoom]);
+
+  // Reload if external layers changed
+  useEffect(() => {
+    const reload = async () => {
+      try {
+        const loaded = await getProjectLayers(projectId);
+        setLayerData(loaded);
+      } catch {
+        toast.error('Failed to load layers');
+      }
+    };
+    void reload();
+  }, [projectId, canvasSettingsVersion, layers]);
+
+  const handleSegmentation = async (images: string[]) => {
+    if (!projectId) return;
+
+    try {
+      // Create new layers for each segmented image
+      for (const imageUrl of images) {
+        // Convert data URL to Uint8Array
+        const response = await fetch(imageUrl);
+        const blob = await response.blob();
+        const arrayBuffer = await blob.arrayBuffer();
+        const data = new Uint8Array(arrayBuffer);
+
+        // Create image asset
+        const assetId = await createImageAsset(
+          'segmented-image.png',
+          'image/png',
+          data
+        );
+
+        // Create blob URL for immediate display
+        const url = URL.createObjectURL(blob);
+
+        // Update assetData state first
+        setAssetData((prev) => ({
+          ...prev,
+          [assetId]: {
+            url,
+            loading: false,
+            error: false,
+          },
+        }));
+
+        // Get image dimensions
+        const img = new Image();
+        const imageSize = await new Promise<{ width: number; height: number }>(
+          (resolve, reject) => {
+            img.onload = () =>
+              resolve({
+                width: img.naturalWidth,
+                height: img.naturalHeight,
+              });
+            img.onerror = reject;
+            img.src = url;
+          }
+        );
+
+        // Create the layer
+        const newLayer = {
+          id: nanoid(),
+          type: 'image' as const,
+          imageAssetId: assetId,
+          transform: {
+            x: 960 - imageSize.width / 2,
+            y: 540 - imageSize.height / 2,
+            width: imageSize.width,
+            height: imageSize.height,
+            rotation: 0,
+            scaleX: 1,
+            scaleY: 1,
+            opacity: 1,
+            blendMode: 'normal',
+          },
+        };
+
+        // Record the action before creating the layer
+        await createAction({
+          projectId,
+          type: 'add_layer',
+          layerId: newLayer.id,
+          before: null,
+          after: {
+            ...newLayer,
+            index: layers.length,
+          },
+        });
+
+        // Create the layer in the database
+        await createLayer(projectId, newLayer);
+      }
+
+      // Get the updated layer data
+      const updatedLayers = await getProjectLayers(projectId);
+
+      // Update all states in a single batch
+      setLayerData(updatedLayers);
+      onLayerSelect(null); // Deselect any selected layer
+
+      // Update the project's last modified timestamp
+      await updateProjectTimestamp(projectId);
+
+      toast.success(`Added ${images.length} segmented layers`);
+    } catch (error) {
+      console.error('Failed to create segmented layers:', error);
+      toast.error('Failed to create segmented layers');
+    }
+  };
+
+  const handleFlipHorizontal = () => {
+    if (!selectedLayerId) return;
+    const layer = layerData.find((l) => l.id === selectedLayerId);
+    if (!layer) return;
+
+    onLayerUpdate({
+      ...layer,
+      transform: {
+        ...layer.transform,
+        scaleX: (layer.transform.scaleX ?? 1) * -1,
+      },
+    });
+  };
+
+  const handleFlipVertical = () => {
+    if (!selectedLayerId) return;
+    const layer = layerData.find((l) => l.id === selectedLayerId);
+    if (!layer) return;
+
+    onLayerUpdate({
+      ...layer,
+      transform: {
+        ...layer.transform,
+        scaleY: (layer.transform.scaleY ?? 1) * -1,
+      },
+    });
   };
 
   const renderLayer = (layer: Layer) => {
     const layerIndex = layers.find((l) => l.id === layer.id)?.index ?? 0;
     const isSelected = selectedLayerId === layer.id;
+    const effectiveZIndex = layerIndex * 10 + (isSelected ? 1000 : 0);
 
     const commonProps = {
       className: cn(
         'absolute select-none layer',
         isDragging && isSelected ? 'cursor-grabbing' : 'cursor-grab',
         layer.type === 'text' && editingTextId === layer.id && 'cursor-text',
-        isResizing && 'pointer-events-none' // Add pointer-events-none when resizing
+        isResizing && 'pointer-events-none'
       ),
       style: {
-        transform: `translate(${layer.transform.x}px, ${layer.transform.y}px) 
-                   rotate(${layer.transform.rotation}deg) 
-                   scale(${layer.transform.scaleX}, ${layer.transform.scaleY})`,
+        transform: `translate(${layer.transform.x}px, ${layer.transform.y}px)
+                    rotate(${layer.transform.rotation}deg)
+                    scale(${layer.transform.scaleX}, ${layer.transform.scaleY})`,
         width: layer.transform.width,
         height: layer.transform.height,
         opacity: layer.transform.opacity,
         mixBlendMode: layer.transform
           .blendMode as React.CSSProperties['mixBlendMode'],
-        zIndex: layerIndex * 10,
-        pointerEvents: isResizing
-          ? 'none'
-          : ('auto' as React.CSSProperties['pointerEvents']), // Fix type
-      },
-      onClick: (e: React.MouseEvent) => handleLayerClick(e, layer.id),
-      onMouseDown: (e: React.MouseEvent) => {
-        // Prevent drag start if we're resizing
-        if (isResizing) {
-          e.stopPropagation();
-          e.preventDefault();
-          return;
+        zIndex: effectiveZIndex,
+        pointerEvents: isResizing ? 'none' : 'auto',
+      } as React.CSSProperties,
+      onClick: (e: React.MouseEvent) => {
+        if (!(e.target as HTMLElement).closest('[data-control]')) {
+          handleLayerClick(e, layer.id);
         }
-        handleMouseDown(e, layer);
+      },
+      onMouseDown: (e: React.MouseEvent) => {
+        if (!(e.target as HTMLElement).closest('[data-control]')) {
+          if (isResizing) {
+            e.stopPropagation();
+            e.preventDefault();
+            return;
+          }
+          handleMouseDown(e, layer);
+        }
       },
     };
 
-    switch (layer.type) {
-      case 'image':
-      case 'sticker': {
-        const assetId =
-          layer.type === 'image' ? layer.imageAssetId : layer.stickerAssetId;
-        const asset = assetData[assetId];
+    const handleReorder = async (direction: 'up' | 'down') => {
+      const idx = layers.find((l) => l.id === layer.id)?.index ?? 0;
+      const target = direction === 'up' ? idx + 1 : idx - 1;
+      if (target >= 0 && target < layers.length) {
+        await onLayerReorder(layer.id, target);
+        const updated = await getProjectLayers(projectId);
+        setLayerData(updated);
+      }
+    };
 
-        if (!asset || asset.loading) {
-          return (
-            <div key={layer.id} {...commonProps}>
+    if (layer.type === 'image' || layer.type === 'sticker') {
+      const assetId =
+        layer.type === 'image' ? layer.imageAssetId : layer.stickerAssetId;
+      const asset = assetData[assetId];
+
+      if (!asset || asset.loading) {
+        return (
+          <LayerContextMenu
+            key={layer.id}
+            layer={layer}
+            onLayerUpdate={onLayerUpdate}
+            onLayerDelete={() => onLayerDelete(layer.id)}
+            onLayerDuplicate={() => onLayerDuplicate(layer.id)}
+            onLayerReorder={handleReorder}
+          >
+            <div {...commonProps}>
               <div className='w-full h-full bg-accent/20 flex items-center justify-center'>
                 <span className='text-accent-foreground'>Loading...</span>
               </div>
             </div>
-          );
-        }
-
-        if (asset.error) {
-          return (
-            <div key={layer.id} {...commonProps}>
+          </LayerContextMenu>
+        );
+      }
+      if (asset.error) {
+        return (
+          <LayerContextMenu
+            key={layer.id}
+            layer={layer}
+            onLayerUpdate={onLayerUpdate}
+            onLayerDelete={() => onLayerDelete(layer.id)}
+            onLayerDuplicate={() => onLayerDuplicate(layer.id)}
+            onLayerReorder={handleReorder}
+          >
+            <div {...commonProps}>
               <div className='w-full h-full bg-destructive/20 flex items-center justify-center'>
                 <span className='text-destructive'>Failed to load image</span>
               </div>
             </div>
-          );
-        }
+          </LayerContextMenu>
+        );
+      }
 
-        return (
-          <div key={layer.id} {...commonProps}>
+      return (
+        <LayerContextMenu
+          key={layer.id}
+          layer={layer}
+          onLayerUpdate={onLayerUpdate}
+          onLayerDelete={() => onLayerDelete(layer.id)}
+          onLayerDuplicate={() => onLayerDuplicate(layer.id)}
+          onLayerReorder={handleReorder}
+        >
+          <div {...commonProps}>
             <img
               src={asset.url}
               alt=''
               className='w-full h-full object-contain'
               draggable={false}
             />
-            {/* Selection border */}
-            {selectedLayerId === layer.id && (
-              <>
-                <div className='absolute -inset-[4px] z-selection pointer-events-none overflow-visible'>
+            {isSelected && (
+              <div
+                className='absolute inset-0 z-[1000]'
+                style={{ pointerEvents: 'none' }}
+              >
+                <div className='absolute -inset-[4px] overflow-visible'>
                   <div className='absolute inset-0 rainbow-border' />
                 </div>
-                {/* Resize handles */}
-                {(() => {
-                  const isFlippedX = (layer.transform.scaleX ?? 1) < 0;
-                  const isFlippedY = (layer.transform.scaleY ?? 1) < 0;
-
-                  // Adjust cursor directions based on flip state
-                  const getCursor = (handle: string) => {
-                    switch (handle) {
-                      case 'nw':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}-resize`;
-                      case 'ne':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'sw':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}-resize`;
-                      case 'se':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'n':
-                        return `${isFlippedY ? 's' : 'n'}-resize`;
-                      case 's':
-                        return `${isFlippedY ? 'n' : 's'}-resize`;
-                      case 'e':
-                        return `${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'w':
-                        return `${isFlippedX ? 'e' : 'w'}-resize`;
-                      default:
-                        return 'move';
-                    }
-                  };
-
-                  // Adjust handle type based on flip state
-                  const getHandle = (handle: string) => {
-                    switch (handle) {
-                      case 'nw':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}`;
-                      case 'ne':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}`;
-                      case 'sw':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}`;
-                      case 'se':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}`;
-                      default:
-                        return handle;
-                    }
-                  };
-
-                  return (
-                    <>
-                      {/* Corner handles - always shown */}
-                      <div
-                        className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('nw') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('nw') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('ne') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('ne') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('sw') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('sw') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('se') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('se') as any);
-                        }}
-                      />
-                    </>
-                  );
-                })()}
-              </>
-            )}
-          </div>
-        );
-      }
-
-      case 'text': {
-        const isEditing = editingTextId === layer.id;
-        return (
-          <div
-            key={layer.id}
-            {...commonProps}
-            onDoubleClick={(e) => handleTextDoubleClick(e, layer)}
-            className={cn(
-              commonProps.className,
-              'flex items-center justify-center overflow-visible',
-              layer.style.wordWrap === 'break-word' &&
-                'whitespace-normal break-words',
-              layer.style.wordWrap === 'normal' && 'whitespace-nowrap',
-              isEditing && 'cursor-text'
-            )}
-            style={{
-              ...commonProps.style,
-              pointerEvents: isEditing ? 'none' : 'auto',
-            }}
-          >
-            {isEditing ? (
-              <>
-                {/* Editable text container */}
                 <div
-                  contentEditable
-                  suppressContentEditableWarning
-                  onInput={(e) => handleContentEditableChange(e, layer)}
-                  onBlur={handleTextBlur}
-                  onClick={(e) => e.stopPropagation()}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onKeyDown={(e) => e.stopPropagation()}
-                  ref={(el) => {
-                    if (el && isEditing) {
-                      el.focus();
-                      // Place cursor at end of text
-                      const range = document.createRange();
-                      const sel = window.getSelection();
-                      range.selectNodeContents(el);
-                      range.collapse(false);
-                      sel?.removeAllRanges();
-                      sel?.addRange(range);
-                    }
+                  data-control='rotate'
+                  className='absolute left-1/2 -top-8 w-0.5 h-8 bg-orange-500 origin-bottom cursor-grab active:cursor-grabbing'
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    handleRotationStart(e, layer);
                   }}
-                  className='w-full h-full bg-transparent outline-none'
-                  style={
-                    {
-                      fontFamily: layer.style.fontFamily,
-                      fontSize: layer.style.fontSize,
-                      fontWeight: layer.style.fontWeight,
-                      color: layer.style.color,
-                      backgroundColor:
-                        layer.style.backgroundColor || 'transparent',
-                      textAlign: layer.style.textAlign,
-                      fontStyle: layer.style.italic ? 'italic' : 'normal',
-                      textDecoration: layer.style.underline
-                        ? 'underline'
-                        : 'none',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems:
-                        layer.style.textAlign === 'left'
-                          ? 'flex-start'
-                          : layer.style.textAlign === 'right'
-                            ? 'flex-end'
-                            : 'center',
-                      justifyContent:
-                        layer.style.verticalAlign === 'top'
-                          ? 'flex-start'
-                          : layer.style.verticalAlign === 'bottom'
-                            ? 'flex-end'
-                            : 'center',
-                      whiteSpace:
-                        layer.style.wordWrap === 'break-word'
-                          ? 'pre-wrap'
-                          : 'pre',
-                      overflow: 'hidden',
-                      width: '100%',
-                      height: '100%',
-                      userSelect: 'text',
-                      cursor: 'text',
-                      wordBreak:
-                        layer.style.wordWrap === 'break-word'
-                          ? 'break-word'
-                          : 'normal',
-                      wordWrap: layer.style.wordWrap,
-                      pointerEvents: 'auto',
-                      '--text-stroke-width': layer.style.stroke?.enabled
-                        ? `${layer.style.stroke.width}px`
-                        : '0',
-                      '--text-stroke-color': layer.style.stroke?.enabled
-                        ? layer.style.stroke.color
-                        : 'transparent',
-                      WebkitTextStrokeWidth: 'var(--text-stroke-width)',
-                      WebkitTextStrokeColor: 'var(--text-stroke-color)',
-                    } as React.CSSProperties
-                  }
+                  style={{ pointerEvents: 'auto' }}
                 >
-                  {layer.content}
+                  <div className='absolute -top-1.5 left-1/2 w-3 h-3 -translate-x-1/2 bg-orange-500 rounded-full ring-2 ring-background shadow-md' />
                 </div>
-              </>
-            ) : (
-              // Non-editing view
-              <div
-                className='w-full h-full'
-                onClick={(e) => handleLayerClick(e, layer.id)}
-                onMouseDown={(e) => handleMouseDown(e, layer)}
-                style={
-                  {
-                    fontFamily: layer.style.fontFamily,
-                    fontSize: layer.style.fontSize,
-                    fontWeight: layer.style.fontWeight,
-                    color: layer.style.color,
-                    backgroundColor:
-                      layer.style.backgroundColor || 'transparent',
-                    textAlign: layer.style.textAlign,
-                    fontStyle: layer.style.italic ? 'italic' : 'normal',
-                    textDecoration: layer.style.underline
-                      ? 'underline'
-                      : 'none',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems:
-                      layer.style.textAlign === 'left'
-                        ? 'flex-start'
-                        : layer.style.textAlign === 'right'
-                          ? 'flex-end'
-                          : 'center',
-                    justifyContent:
-                      layer.style.verticalAlign === 'top'
-                        ? 'flex-start'
-                        : layer.style.verticalAlign === 'bottom'
-                          ? 'flex-end'
-                          : 'center',
-                    whiteSpace:
-                      layer.style.wordWrap === 'break-word'
-                        ? 'pre-wrap'
-                        : 'pre',
-                    wordBreak:
-                      layer.style.wordWrap === 'break-word'
-                        ? 'break-word'
-                        : 'normal',
-                    wordWrap: layer.style.wordWrap,
-                    '--text-stroke-width': layer.style.stroke?.enabled
-                      ? `${layer.style.stroke.width}px`
-                      : '0',
-                    '--text-stroke-color': layer.style.stroke?.enabled
-                      ? layer.style.stroke.color
-                      : 'transparent',
-                    WebkitTextStrokeWidth: 'var(--text-stroke-width)',
-                    WebkitTextStrokeColor: 'var(--text-stroke-color)',
-                    userSelect: 'none',
-                    pointerEvents: 'auto',
-                    overflow: 'hidden',
-                  } as React.CSSProperties
-                }
-              >
-                <div className='w-full'>{layer.content}</div>
+                {renderResizeHandles(layer)}
               </div>
             )}
-
-            {/* Selection border */}
-            {selectedLayerId === layer.id && (
-              <>
-                <div className='absolute -inset-[4px] z-selection pointer-events-none overflow-visible'>
-                  <div className='absolute inset-0 rainbow-border' />
-                </div>
-                {/* Resize handles */}
-                {(() => {
-                  const isFlippedX = (layer.transform.scaleX ?? 1) < 0;
-                  const isFlippedY = (layer.transform.scaleY ?? 1) < 0;
-
-                  // Adjust cursor directions based on flip state
-                  const getCursor = (handle: string) => {
-                    switch (handle) {
-                      case 'nw':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}-resize`;
-                      case 'ne':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'sw':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}-resize`;
-                      case 'se':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'n':
-                        return `${isFlippedY ? 's' : 'n'}-resize`;
-                      case 's':
-                        return `${isFlippedY ? 'n' : 's'}-resize`;
-                      case 'e':
-                        return `${isFlippedX ? 'w' : 'e'}-resize`;
-                      case 'w':
-                        return `${isFlippedX ? 'e' : 'w'}-resize`;
-                      default:
-                        return 'move';
-                    }
-                  };
-
-                  // Adjust handle type based on flip state
-                  const getHandle = (handle: string) => {
-                    switch (handle) {
-                      case 'nw':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}`;
-                      case 'ne':
-                        return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}`;
-                      case 'sw':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}`;
-                      case 'se':
-                        return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}`;
-                      default:
-                        return handle;
-                    }
-                  };
-
-                  return (
-                    <>
-                      {/* Corner handles - always shown */}
-                      <div
-                        className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('nw') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('nw') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('ne') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('ne') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('sw') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('sw') as any);
-                        }}
-                      />
-                      <div
-                        className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                        style={{ cursor: getCursor('se') }}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleResizeStart(e, getHandle('se') as any);
-                        }}
-                      />
-
-                      {/* Edge handles - only shown for text layers */}
-                      {layer.type === 'text' && (
-                        <>
-                          <div
-                            className='absolute top-1/2 -left-1.5 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                            style={{ cursor: getCursor('w') }}
-                            onMouseDown={(e) => {
-                              e.stopPropagation();
-                              e.preventDefault();
-                              handleResizeStart(e, getHandle('w') as any);
-                            }}
-                          />
-                          <div
-                            className='absolute top-1/2 -right-1.5 w-3 h-3 bg-orange-500 rounded-full transform translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                            style={{ cursor: getCursor('e') }}
-                            onMouseDown={(e) => {
-                              e.stopPropagation();
-                              e.preventDefault();
-                              handleResizeStart(e, getHandle('e') as any);
-                            }}
-                          />
-                          <div
-                            className='absolute -top-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                            style={{ cursor: getCursor('n') }}
-                            onMouseDown={(e) => {
-                              e.stopPropagation();
-                              e.preventDefault();
-                              handleResizeStart(e, getHandle('n') as any);
-                            }}
-                          />
-                          <div
-                            className='absolute -bottom-1.5 left-1/2 w-3 h-3 bg-orange-500 rounded-full transform -translate-x-1/2 translate-y-1/2 ring-2 ring-background shadow-md z-selection'
-                            style={{ cursor: getCursor('s') }}
-                            onMouseDown={(e) => {
-                              e.stopPropagation();
-                              e.preventDefault();
-                              handleResizeStart(e, getHandle('s') as any);
-                            }}
-                          />
-                        </>
-                      )}
-                    </>
-                  );
-                })()}
-              </>
-            )}
           </div>
-        );
-      }
+        </LayerContextMenu>
+      );
     }
+
+    // text
+    const isEditing = editingTextId === layer.id;
+    return (
+      <LayerContextMenu
+        key={layer.id}
+        layer={layer}
+        onLayerUpdate={onLayerUpdate}
+        onLayerDelete={() => onLayerDelete(layer.id)}
+        onLayerDuplicate={() => onLayerDuplicate(layer.id)}
+        onLayerReorder={handleReorder}
+      >
+        <div
+          {...commonProps}
+          onDoubleClick={(e) => handleTextDoubleClick(e, layer)}
+          className={cn(
+            commonProps.className,
+            'flex items-center justify-center overflow-visible',
+            layer.style.wordWrap === 'break-word' && 'break-words',
+            layer.style.wordWrap === 'normal' && 'whitespace-nowrap',
+            isEditing && 'cursor-text'
+          )}
+          style={{
+            ...commonProps.style,
+            pointerEvents: isEditing ? 'none' : 'auto',
+          }}
+        >
+          {isEditing ? (
+            <div
+              contentEditable
+              suppressContentEditableWarning
+              onInput={(e) => handleContentEditableChange(e, layer)}
+              onBlur={handleTextBlur}
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+              ref={(el) => {
+                if (el && isEditing) {
+                  el.focus();
+                  const rng = document.createRange();
+                  const sel = window.getSelection();
+                  rng.selectNodeContents(el);
+                  rng.collapse(false);
+                  sel?.removeAllRanges();
+                  sel?.addRange(rng);
+                }
+              }}
+              style={
+                {
+                  fontFamily: layer.style.fontFamily,
+                  fontSize: layer.style.fontSize,
+                  fontWeight: layer.style.fontWeight,
+                  color: layer.style.color,
+                  backgroundColor: layer.style.backgroundColor || 'transparent',
+                  textAlign: layer.style.textAlign,
+                  fontStyle: layer.style.italic ? 'italic' : 'normal',
+                  textDecoration: layer.style.underline ? 'underline' : 'none',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems:
+                    layer.style.textAlign === 'left'
+                      ? 'flex-start'
+                      : layer.style.textAlign === 'right'
+                        ? 'flex-end'
+                        : 'center',
+                  justifyContent:
+                    layer.style.verticalAlign === 'top'
+                      ? 'flex-start'
+                      : layer.style.verticalAlign === 'bottom'
+                        ? 'flex-end'
+                        : 'center',
+                  whiteSpace:
+                    layer.style.wordWrap === 'break-word' ? 'pre-wrap' : 'pre',
+                  overflow: 'hidden',
+                  width: '100%',
+                  height: '100%',
+                  userSelect: 'text',
+                  cursor: 'text',
+                  wordBreak:
+                    layer.style.wordWrap === 'break-word'
+                      ? 'break-word'
+                      : 'normal',
+                  wordWrap: layer.style.wordWrap,
+                  '--text-stroke-width': layer.style.stroke?.enabled
+                    ? `${layer.style.stroke.width}px`
+                    : '0',
+                  '--text-stroke-color': layer.style.stroke?.enabled
+                    ? layer.style.stroke.color
+                    : 'transparent',
+                  WebkitTextStrokeWidth: 'var(--text-stroke-width)',
+                  WebkitTextStrokeColor: 'var(--text-stroke-color)',
+                  pointerEvents: 'auto',
+                } as CSSWithVar
+              }
+              className='w-full h-full bg-transparent outline-none'
+            >
+              {layer.content}
+            </div>
+          ) : (
+            <div
+              className='w-full h-full'
+              onClick={(e) => handleLayerClick(e, layer.id)}
+              onMouseDown={(e) => handleMouseDown(e, layer)}
+              style={
+                {
+                  fontFamily: layer.style.fontFamily,
+                  fontSize: layer.style.fontSize,
+                  fontWeight: layer.style.fontWeight,
+                  color: layer.style.color,
+                  backgroundColor: layer.style.backgroundColor || 'transparent',
+                  textAlign: layer.style.textAlign,
+                  fontStyle: layer.style.italic ? 'italic' : 'normal',
+                  textDecoration: layer.style.underline ? 'underline' : 'none',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems:
+                    layer.style.textAlign === 'left'
+                      ? 'flex-start'
+                      : layer.style.textAlign === 'right'
+                        ? 'flex-end'
+                        : 'center',
+                  justifyContent:
+                    layer.style.verticalAlign === 'top'
+                      ? 'flex-start'
+                      : layer.style.verticalAlign === 'bottom'
+                        ? 'flex-end'
+                        : 'center',
+                  whiteSpace:
+                    layer.style.wordWrap === 'break-word' ? 'pre-wrap' : 'pre',
+                  wordBreak:
+                    layer.style.wordWrap === 'break-word'
+                      ? 'break-word'
+                      : 'normal',
+                  wordWrap: layer.style.wordWrap,
+                  '--text-stroke-width': layer.style.stroke?.enabled
+                    ? `${layer.style.stroke.width}px`
+                    : '0',
+                  '--text-stroke-color': layer.style.stroke?.enabled
+                    ? layer.style.stroke.color
+                    : 'transparent',
+                  WebkitTextStrokeWidth: 'var(--text-stroke-width)',
+                  WebkitTextStrokeColor: 'var(--text-stroke-color)',
+                  userSelect: 'none',
+                  pointerEvents: 'auto',
+                  overflow: 'hidden',
+                } as CSSWithVar
+              }
+            >
+              <div className='w-full'>{layer.content}</div>
+            </div>
+          )}
+
+          {isSelected && (
+            <div
+              className='absolute inset-0 z-[1000]'
+              style={{ pointerEvents: 'none' }}
+            >
+              <div className='absolute -inset-[4px] overflow-visible'>
+                <div className='absolute inset-0 rainbow-border' />
+              </div>
+              <div
+                data-control='rotate'
+                className='absolute left-1/2 -top-8 w-0.5 h-8 bg-orange-500 origin-bottom cursor-grab active:cursor-grabbing'
+                onMouseDown={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  handleRotationStart(e, layer);
+                }}
+                style={{ pointerEvents: 'auto' }}
+              >
+                <div className='absolute -top-1.5 left-1/2 w-3 h-3 -translate-x-1/2 bg-orange-500 rounded-full ring-2 ring-background shadow-md' />
+              </div>
+              {renderResizeHandles(layer)}
+            </div>
+          )}
+        </div>
+      </LayerContextMenu>
+    );
   };
 
-  // Sort layers for rendering
+  // Render the 4 corner handles for a layer
+  const renderResizeHandles = (layer: Layer) => {
+    const isFlippedX = (layer.transform.scaleX ?? 1) < 0;
+    const isFlippedY = (layer.transform.scaleY ?? 1) < 0;
+
+    // Single helper to get the correct cursor
+    const getCursor = (h: string) => {
+      switch (h) {
+        case 'nw':
+          return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}-resize`;
+        case 'ne':
+          return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}-resize`;
+        case 'sw':
+          return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}-resize`;
+        case 'se':
+          return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}-resize`;
+        case 'n':
+          return `${isFlippedY ? 's' : 'n'}-resize`;
+        case 's':
+          return `${isFlippedY ? 'n' : 's'}-resize`;
+        case 'e':
+          return `${isFlippedX ? 'w' : 'e'}-resize`;
+        case 'w':
+          return `${isFlippedX ? 'e' : 'w'}-resize`;
+        default:
+          return 'move';
+      }
+    };
+
+    // Flip handle direction, matching your old approach
+    const flipHandle = (base: string) => {
+      switch (base) {
+        case 'nw':
+          return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'e' : 'w'}`;
+        case 'ne':
+          return `${isFlippedY ? 's' : 'n'}${isFlippedX ? 'w' : 'e'}`;
+        case 'sw':
+          return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'e' : 'w'}`;
+        case 'se':
+          return `${isFlippedY ? 'n' : 's'}${isFlippedX ? 'w' : 'e'}`;
+        default:
+          return base;
+      }
+    };
+
+    return (
+      <>
+        <div
+          data-control='resize'
+          className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full ring-2 ring-background shadow-md'
+          style={{ cursor: getCursor('nw'), pointerEvents: 'auto' }}
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            handleResizeStart(e, flipHandle('nw') as any);
+          }}
+        />
+        <div
+          data-control='resize'
+          className='absolute -top-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full ring-2 ring-background shadow-md'
+          style={{ cursor: getCursor('ne'), pointerEvents: 'auto' }}
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            handleResizeStart(e, flipHandle('ne') as any);
+          }}
+        />
+        <div
+          data-control='resize'
+          className='absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-orange-500 rounded-full ring-2 ring-background shadow-md'
+          style={{ cursor: getCursor('sw'), pointerEvents: 'auto' }}
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            handleResizeStart(e, flipHandle('sw') as any);
+          }}
+        />
+        <div
+          data-control='resize'
+          className='absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-orange-500 rounded-full ring-2 ring-background shadow-md'
+          style={{ cursor: getCursor('se'), pointerEvents: 'auto' }}
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            handleResizeStart(e, flipHandle('se') as any);
+          }}
+        />
+      </>
+    );
+  };
+
+  // Sort for rendering
   const sortedLayers = layerData
     .sort((a, b) => compareLayersForRender(a, b, layers))
-    .map((layer) => ({
-      ...layer,
-      zIndex: (layers.find((l) => l.id === layer.id)?.index ?? 0) * 10,
+    .map((l) => ({
+      ...l,
+      zIndex: (layers.find((x) => x.id === l.id)?.index ?? 0) * 10,
     }));
 
-  // Handle wheel events for trackpad gestures
-  const handleWheel = (e: WheelEvent) => {
-    // Check if it's a pinch gesture (ctrl/cmd + wheel)
+  // Mouse wheel for zoom/pan
+  const handleWheelEvent = (e: WheelEvent) => {
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
       const rect = canvasRef.current?.getBoundingClientRect();
       if (!rect) return;
-
-      const delta = -e.deltaY * 0.001; // Adjust sensitivity
+      const delta = -e.deltaY * 0.001;
       handleZoom(delta);
     } else if (e.shiftKey) {
-      // Horizontal scroll with shift
       e.preventDefault();
       setViewportOffset((prev) => ({
         x: prev.x - e.deltaY,
         y: prev.y,
       }));
     } else {
-      // Normal scroll
       e.preventDefault();
       setViewportOffset((prev) => ({
         x: prev.x - e.deltaX,
@@ -1193,20 +1986,19 @@ export function Canvas({
     }
   };
 
-  // Add wheel event listener
   useEffect(() => {
-    const workspace = workspaceRef.current;
-    if (!workspace) return;
+    const ws = workspaceRef.current;
+    if (!ws) return;
 
-    workspace.addEventListener('wheel', handleWheel, { passive: false });
+    ws.addEventListener('wheel', handleWheelEvent, { passive: false });
     return () => {
-      workspace.removeEventListener('wheel', handleWheel);
+      ws.removeEventListener('wheel', handleWheelEvent);
     };
-  }, [zoom, canvasRef.current]);
+  }, [zoom]);
 
-  // Handle panning
+  // Panning
   const handlePanStart = (e: React.MouseEvent) => {
-    // Middle mouse button or if pan tool is active
+    // Middle mouse
     if (e.button !== 1 && !isPanning) return;
     e.preventDefault();
     setIsPanning(true);
@@ -1220,374 +2012,61 @@ export function Canvas({
     if (!isPanning) return;
     const newX = e.clientX - panStart.x;
     const newY = e.clientY - panStart.y;
-
-    // Add bounds to prevent panning too far
-    const workspace = workspaceRef.current;
-    const canvas = canvasRef.current;
-    if (!workspace || !canvas) return;
-
-    const workspaceRect = workspace.getBoundingClientRect();
-    const canvasRect = canvas.getBoundingClientRect();
-
-    // Calculate bounds with some padding
-    const padding = 100;
-    const minX = workspaceRect.width - canvasRect.width * zoom - padding;
-    const minY = workspaceRect.height - canvasRect.height * zoom - padding;
-    const maxX = padding;
-    const maxY = padding;
-
-    setViewportOffset({
-      x: Math.min(maxX, Math.max(minX, newX)),
-      y: Math.min(maxY, Math.max(minY, newY)),
-    });
+    setViewportOffset({ x: newX, y: newY });
   };
 
   const handlePanEnd = () => {
     setIsPanning(false);
   };
 
-  const handleResizeMove = (e: MouseEvent | React.MouseEvent) => {
-    if (!isResizing || !resizeHandle || !selectedLayerId) return;
-
-    const layer = layerData.find((l) => l.id === selectedLayerId);
-    if (!layer) return;
-
-    const deltaX = (e.clientX - resizeStart.x) / zoom;
-    const deltaY = (e.clientY - resizeStart.y) / zoom;
-    let newWidth = resizeStart.width;
-    let newHeight = resizeStart.height;
-    let newX = layer.transform.x;
-    let newY = layer.transform.y;
-
-    // Get current scale factors (including flips)
-    const currentScaleX = layer.transform.scaleX ?? 1;
-    const currentScaleY = layer.transform.scaleY ?? 1;
-    const isFlippedX = currentScaleX < 0;
-    const isFlippedY = currentScaleY < 0;
-
-    // Always maintain aspect ratio for image and sticker layers
-    const shouldMaintainAspectRatio =
-      layer.type === 'image' ||
-      layer.type === 'sticker' ||
-      (e instanceof MouseEvent && e.shiftKey);
-    const aspectRatio = resizeStart.width / resizeStart.height;
-
-    // Adjust delta based on flipped state
-    const adjustedDeltaX = isFlippedX ? -deltaX : deltaX;
-    const adjustedDeltaY = isFlippedY ? -deltaY : deltaY;
-
-    // Handle different resize directions, accounting for flipped states
-    if (resizeHandle.includes('e')) {
-      const delta = isFlippedX ? -adjustedDeltaX : adjustedDeltaX;
-      newWidth = Math.max(50, resizeStart.width + delta);
-      if (shouldMaintainAspectRatio) {
-        newHeight = newWidth / aspectRatio;
-      }
-    }
-    if (resizeHandle.includes('w')) {
-      const delta = isFlippedX ? -adjustedDeltaX : adjustedDeltaX;
-      const width = Math.max(50, resizeStart.width - delta);
-      if (shouldMaintainAspectRatio) {
-        const heightDiff = width / aspectRatio - resizeStart.height;
-        newWidth = width;
-        newHeight = width / aspectRatio;
-        newX = layer.transform.x + (resizeStart.width - width);
-        newY = layer.transform.y - heightDiff / 2;
-      } else {
-        newWidth = width;
-        newX = layer.transform.x + (resizeStart.width - width);
-      }
-    }
-    if (resizeHandle.includes('s')) {
-      const delta = isFlippedY ? -adjustedDeltaY : adjustedDeltaY;
-      newHeight = Math.max(50, resizeStart.height + delta);
-      if (shouldMaintainAspectRatio) {
-        newWidth = newHeight * aspectRatio;
-      }
-    }
-    if (resizeHandle.includes('n')) {
-      const delta = isFlippedY ? -adjustedDeltaY : adjustedDeltaY;
-      const height = Math.max(50, resizeStart.height - delta);
-      if (shouldMaintainAspectRatio) {
-        const widthDiff = height * aspectRatio - resizeStart.width;
-        newHeight = height;
-        newWidth = height * aspectRatio;
-        newY = layer.transform.y + (resizeStart.height - height);
-        newX = layer.transform.x - widthDiff / 2;
-      } else {
-        newHeight = height;
-        newY = layer.transform.y + (resizeStart.height - height);
-      }
-    }
-
-    // For corner handles
-    if (resizeHandle.length === 2) {
-      if (shouldMaintainAspectRatio) {
-        // Calculate the cursor's movement direction and magnitude
-        const dx = resizeHandle.includes('w') ? -deltaX : deltaX;
-        const dy = resizeHandle.includes('n') ? -deltaY : deltaY;
-
-        // Project the movement onto the diagonal of the original shape
-        const diagonalLength = Math.sqrt(
-          resizeStart.width * resizeStart.width +
-            resizeStart.height * resizeStart.height
-        );
-        const movementProjection =
-          (dx * resizeStart.width + dy * resizeStart.height) / diagonalLength;
-
-        // Calculate scale based on the projected movement
-        const scale = 1 + movementProjection / diagonalLength;
-
-        // Apply the scale while maintaining aspect ratio
-        newWidth = Math.max(50, resizeStart.width * scale);
-        newHeight = Math.max(50, (resizeStart.width * scale) / aspectRatio);
-
-        // Adjust position based on which corner is being dragged
-        if (resizeHandle.includes('w')) {
-          newX = layer.transform.x + (resizeStart.width - newWidth);
-        }
-        if (resizeHandle.includes('n')) {
-          newY = layer.transform.y + (resizeStart.height - newHeight);
-        }
-      }
-    }
-
-    // Update layer with new dimensions
-    setLayerData((prev) =>
-      prev.map((l) =>
-        l.id === selectedLayerId
-          ? {
-              ...l,
-              transform: {
-                ...l.transform,
-                x: newX,
-                y: newY,
-                width: newWidth,
-                height: newHeight,
-              },
-            }
-          : l
-      )
-    );
-  };
-
-  const handleResizeEnd = () => {
-    if (isResizing && selectedLayerId) {
-      const layer = layerData.find((l) => l.id === selectedLayerId);
-      if (layer) {
-        onLayerUpdate(layer);
-      }
-    }
-    setIsResizing(false);
-    setResizeHandle(null);
-  };
-
-  // Add resize event listeners
+  // Keyboard shortcuts for zoom
   useEffect(() => {
-    if (!isResizing) return;
-
-    window.addEventListener('mousemove', handleResizeMove);
-    window.addEventListener('mouseup', handleResizeEnd);
-
-    return () => {
-      window.removeEventListener('mousemove', handleResizeMove);
-      window.removeEventListener('mouseup', handleResizeEnd);
-    };
-  }, [isResizing, resizeHandle, resizeStart, selectedLayerId, zoom]);
-
-  // Handle canvas resize
-  const handleCanvasResizeStart = (
-    e: React.MouseEvent<HTMLDivElement>,
-    handle: 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
-  ) => {
-    e.stopPropagation();
-    e.preventDefault();
-
-    setIsCanvasResizing(true);
-    setCanvasResizeHandle(handle);
-    setCanvasResizeStart({
-      x: e.clientX,
-      y: e.clientY,
-      width: canvasSize.width,
-      height: canvasSize.height,
-    });
-  };
-
-  const handleCanvasResizeMove = (e: MouseEvent | React.MouseEvent) => {
-    if (!isCanvasResizing || !canvasResizeHandle) return;
-
-    const deltaX = (e.clientX - canvasResizeStart.x) / zoom;
-    const deltaY = (e.clientY - canvasResizeStart.y) / zoom;
-    let newWidth = canvasResizeStart.width;
-    let newHeight = canvasResizeStart.height;
-    let newX = viewportOffset.x;
-    let newY = viewportOffset.y;
-
-    const MIN_SIZE = 320;
-    const MAX_SIZE = 4096;
-
-    // Handle different resize directions
-    if (canvasResizeHandle.includes('e')) {
-      newWidth = Math.min(
-        MAX_SIZE,
-        Math.max(MIN_SIZE, canvasResizeStart.width + deltaX)
-      );
-    } else if (canvasResizeHandle.includes('w')) {
-      const widthDelta = deltaX;
-      newWidth = Math.min(
-        MAX_SIZE,
-        Math.max(MIN_SIZE, canvasResizeStart.width - widthDelta)
-      );
-      if (newWidth !== canvasResizeStart.width) {
-        newX = viewportOffset.x + (canvasResizeStart.width - newWidth) * zoom;
-      }
-    }
-
-    if (canvasResizeHandle.includes('s')) {
-      newHeight = Math.min(
-        MAX_SIZE,
-        Math.max(MIN_SIZE, canvasResizeStart.height + deltaY)
-      );
-    } else if (canvasResizeHandle.includes('n')) {
-      const heightDelta = deltaY;
-      newHeight = Math.min(
-        MAX_SIZE,
-        Math.max(MIN_SIZE, canvasResizeStart.height - heightDelta)
-      );
-      if (newHeight !== canvasResizeStart.height) {
-        newY = viewportOffset.y + (canvasResizeStart.height - newHeight) * zoom;
-      }
-    }
-
-    // For corner handles, maintain aspect ratio if shift is held
-    if (
-      canvasResizeHandle.length === 2 &&
-      e instanceof MouseEvent &&
-      e.shiftKey
-    ) {
-      const aspectRatio = canvasResizeStart.width / canvasResizeStart.height;
-      if (Math.abs(deltaX) > Math.abs(deltaY)) {
-        newHeight = newWidth / aspectRatio;
-      } else {
-        newWidth = newHeight * aspectRatio;
-      }
-    }
-
-    // Ensure dimensions stay within bounds
-    newWidth = Math.round(Math.min(MAX_SIZE, Math.max(MIN_SIZE, newWidth)));
-    newHeight = Math.round(Math.min(MAX_SIZE, Math.max(MIN_SIZE, newHeight)));
-
-    // Update canvas size without affecting zoom or centering
-    setCanvasSize({
-      width: newWidth,
-      height: newHeight,
-    });
-
-    // Update viewport offset only if necessary (when resizing from left or top)
-    if (canvasResizeHandle.includes('w') || canvasResizeHandle.includes('n')) {
-      setViewportOffset({
-        x: newX,
-        y: newY,
-      });
-    }
-  };
-
-  const handleCanvasResizeEnd = async () => {
-    if (isCanvasResizing) {
-      try {
-        // Round the dimensions to whole numbers
-        const width = Math.round(canvasSize.width);
-        const height = Math.round(canvasSize.height);
-
-        // Update the database directly
-        await updateCanvasSettings(projectId, {
-          width,
-          height,
-        });
-
-        // Update local state with rounded values
-        setCanvasSize({
-          width,
-          height,
-        });
-
-        console.log('Canvas size updated:', { width, height });
-      } catch (error) {
-        console.error('Failed to update canvas settings:', error);
-        toast.error('Failed to save canvas size');
-      }
-    }
-    setIsCanvasResizing(false);
-    setCanvasResizeHandle(null);
-  };
-
-  // Add canvas resize event listeners
-  useEffect(() => {
-    if (!isCanvasResizing) return;
-
-    const handleMouseMove = (e: MouseEvent) => handleCanvasResizeMove(e);
-    const handleMouseUp = () => handleCanvasResizeEnd();
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isCanvasResizing, canvasResizeHandle, canvasResizeStart, zoom]);
-
-  // Add keyboard shortcuts for zooming
-  useEffect(() => {
-    const handleKeyboardShortcuts = (e: KeyboardEvent) => {
-      // Check if Command (Mac) or Control (Windows/Linux) is pressed
+    const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey) {
         switch (e.key) {
-          case '=': // Plus key (with or without shift)
+          case '=':
           case '+':
             e.preventDefault();
             handleZoom(0.1);
             break;
-          case '-': // Minus key
+          case '-':
           case '_':
             e.preventDefault();
             handleZoom(-0.1);
             break;
-          case '0': // Reset zoom and center
+          case '0':
             e.preventDefault();
             centerAndFitCanvas();
             break;
         }
       }
     };
-
-    window.addEventListener('keydown', handleKeyboardShortcuts);
-    return () => window.removeEventListener('keydown', handleKeyboardShortcuts);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+    };
   }, [zoom]);
 
-  // Add this effect after the other useEffects
+  // Reload if layers list changes externally
   useEffect(() => {
-    const loadLayers = async () => {
+    const reload = async () => {
       try {
-        const layers = await getProjectLayers(projectId);
-        setLayerData(layers);
-      } catch (error) {
-        console.error('Failed to load layers:', error);
+        const loaded = await getProjectLayers(projectId);
+        setLayerData(loaded);
+      } catch {
         toast.error('Failed to load layers');
       }
     };
-
-    loadLayers();
-  }, [projectId, canvasSettingsVersion, layers]); // Add layers as a dependency
+    void reload();
+  }, [projectId, canvasSettingsVersion, layers]);
 
   return (
     <div className={cn('relative overflow-hidden bg-neutral-900', className)}>
-      {/* Infinite scrollable workspace */}
       <div
         ref={workspaceRef}
         className='absolute inset-0 overflow-auto'
         onMouseDown={(e) => {
-          // Close toolbars when clicking anywhere in workspace, except on layers, toolbars, or image controls
+          // Deselect if clicking blank space
           const target = e.target as HTMLElement;
           if (
             !target.closest('.layer') &&
@@ -1607,7 +2086,7 @@ export function Canvas({
         }}
         onMouseMove={(e) => {
           if (isResizing) {
-            handleResizeMove(e);
+            // handleResizeMove now inside a useEffect
           } else if (isCanvasResizing) {
             handleCanvasResizeMove(e);
           } else if (isPanning) {
@@ -1632,7 +2111,6 @@ export function Canvas({
             height: `${Math.round(workspaceRef.current?.clientHeight || 0)}px`,
           }}
         >
-          {/* Canvas container */}
           <div
             className='absolute'
             style={{
@@ -1642,7 +2120,6 @@ export function Canvas({
               height: `${Math.round(canvasSize.height * zoom)}px`,
             }}
           >
-            {/* Official canvas area */}
             <div
               ref={canvasRef}
               className='absolute bg-background shadow-2xl rounded-lg'
@@ -1651,30 +2128,34 @@ export function Canvas({
                 height: `${Math.round(canvasSize.height)}px`,
                 transform: `scale(${Number(zoom.toFixed(3))})`,
                 transformOrigin: '0 0',
-                ...(canvasBackground.type === 'color' && {
-                  backgroundColor: canvasBackground.color,
-                }),
+                ...(canvasBackground.type === 'color'
+                  ? { backgroundColor: canvasBackground.color }
+                  : {}),
                 ...(canvasBackground.type === 'image' &&
-                  canvasBackground.imageSize && {
-                    backgroundImage: `url(${canvasBackground.imageUrl})`,
-                    backgroundSize: (() => {
-                      const scaled = calculateScaledDimensions(
-                        canvasBackground.imageSize.width,
-                        canvasBackground.imageSize.height,
-                        canvasSize.width,
-                        canvasSize.height
-                      );
-                      return `${Math.round(scaled.width)}px ${Math.round(scaled.height)}px`;
-                    })(),
-                    backgroundPosition: 'center',
-                    backgroundRepeat: 'no-repeat',
-                    willChange: 'transform',
-                    backfaceVisibility: 'hidden',
-                    WebkitBackfaceVisibility: 'hidden',
-                  }),
+                canvasBackground.imageSize
+                  ? {
+                      backgroundImage: `url(${canvasBackground.imageUrl})`,
+                      backgroundSize: (() => {
+                        const scaled = calculateScaledDimensions(
+                          canvasBackground.imageSize.width,
+                          canvasBackground.imageSize.height,
+                          canvasSize.width,
+                          canvasSize.height
+                        );
+                        return `${Math.round(scaled.width)}px ${Math.round(
+                          scaled.height
+                        )}px`;
+                      })(),
+                      backgroundPosition: 'center',
+                      backgroundRepeat: 'no-repeat',
+                      willChange: 'transform',
+                      backfaceVisibility: 'hidden',
+                      WebkitBackfaceVisibility: 'hidden',
+                    }
+                  : {}),
               }}
             >
-              {/* Canvas grid background */}
+              {/* Grid overlay (small checker if you want) */}
               <div
                 className={cn(
                   'absolute inset-0 pointer-events-none opacity-5',
@@ -1690,20 +2171,19 @@ export function Canvas({
                 }}
               />
 
-              {/* Container for layers that allows overflow */}
               <div className='absolute inset-0' style={{ overflow: 'visible' }}>
-                {/* Render layers */}
-                {sortedLayers.map((layer) => renderLayer(layer))}
+                {sortedLayers.map((ly) => renderLayer(ly))}
+                {(isDragging || isResizing) && renderAlignmentGuides()}
               </div>
 
-              {/* Eraser path overlay */}
               {isEraserMode && eraserPath.length > 0 && (
                 <svg className='absolute inset-0 pointer-events-none'>
                   <path
-                    d={`M ${eraserPath[0][0]} ${eraserPath[0][1]} ${eraserPath
-                      .slice(1)
-                      .map(([x, y]) => `L ${x} ${y}`)
-                      .join(' ')}`}
+                    d={`M ${eraserPath[0][0]} ${eraserPath[0][1]}
+                      ${eraserPath
+                        .slice(1)
+                        .map(([x, y]) => `L ${x} ${y}`)
+                        .join(' ')}`}
                     stroke='black'
                     strokeWidth='2'
                     fill='none'
@@ -1711,7 +2191,6 @@ export function Canvas({
                 </svg>
               )}
 
-              {/* High z-index canvas boundary indicator */}
               <div
                 className='absolute inset-0 pointer-events-none border-2 border-primary'
                 style={{
@@ -1721,13 +2200,11 @@ export function Canvas({
               />
             </div>
 
-            {/* Canvas resize handles */}
             {showCanvasResizeHandles && (
               <div
                 className='absolute inset-0 pointer-events-none'
                 style={{ zIndex: 20 }}
               >
-                {/* Corner handles */}
                 <div
                   className='absolute -top-1.5 -left-1.5 w-3 h-3 bg-primary rounded-full cursor-nw-resize pointer-events-auto ring-2 ring-background'
                   onMouseDown={(e) => handleCanvasResizeStart(e, 'nw')}
@@ -1750,7 +2227,7 @@ export function Canvas({
         </div>
       </div>
 
-      {/* Zoom controls */}
+      {/* Zoom Buttons */}
       <div className='absolute bottom-4 right-4 flex flex-col gap-2'>
         <Button
           variant='secondary'
@@ -1773,9 +2250,7 @@ export function Canvas({
           size='icon'
           onClick={() => {
             centerAndFitCanvas();
-            if (isPanning) {
-              setIsPanning(false);
-            }
+            if (isPanning) setIsPanning(false);
           }}
           className={cn(
             'rounded-full bg-background/80 backdrop-blur-sm shadow-lg hover:bg-accent',
@@ -1787,7 +2262,7 @@ export function Canvas({
         </Button>
       </div>
 
-      {/* Canvas dimensions display */}
+      {/* Canvas size display */}
       <div className='absolute bottom-4 left-1/2 -translate-x-1/2 px-2 py-1 rounded bg-background/80 backdrop-blur-sm text-xs text-muted-foreground'>
         {canvasSize.width} × {canvasSize.height}
       </div>

@@ -17,6 +17,11 @@ import {
   getCanvasSettings,
   getImageAssetData,
   withTransaction,
+  createAction,
+  getProjectActions,
+  updateProjectActionIndex,
+  clearActionsAfterIndex,
+  applyAction,
 } from '@/lib/db';
 import { nanoid } from 'nanoid';
 import { SettingsDialog } from '@/components/settings-dialog';
@@ -81,6 +86,7 @@ import {
 
 import { HeaderToolbar } from '@/components/header-toolbar';
 import { LayerPanel, LayerPanelTrigger } from '@/components/layer-panel';
+import { Action, ActionType } from '@/types/ProjectType';
 
 // Create a custom hook for project loading
 function useProjects() {
@@ -137,6 +143,13 @@ export default function Playground() {
     [key: string]: { url: string; loading: boolean; error: boolean };
   }>({});
   const [canvasSettingsVersion, setCanvasSettingsVersion] = useState(0);
+  const [gridSettings, setGridSettings] = useState({
+    enabled: true,
+    columns: 3,
+    rows: 3,
+    showFractions: true,
+  });
+  const [actions, setActions] = useState<Action[]>([]);
 
   // Add a ref to track if we're currently deleting a project
   const isDeletingProject = useRef(false);
@@ -458,8 +471,8 @@ export default function Playground() {
               img.src = imageUrl;
             });
 
-            // Create the layer with the asset
-            const layerId = await createLayer(currentProject.id, {
+            // Create the layer
+            const newLayer = {
               id: nanoid(),
               type: 'image' as const,
               imageAssetId: assetId,
@@ -474,7 +487,16 @@ export default function Playground() {
                 opacity: 1,
                 blendMode: 'normal',
               },
+            };
+
+            // Record the action before creating the layer
+            await recordAction('add_layer', newLayer.id, null, {
+              ...newLayer,
+              index: currentProject.layers.length,
             });
+
+            // Create the layer in the database
+            const layerId = await createLayer(currentProject.id, newLayer);
 
             // Get the updated layer data
             const [layers, fullProject] = await Promise.all([
@@ -539,24 +561,31 @@ export default function Playground() {
         },
       };
 
-      const layerId = await createLayer(currentProject.id, newLayer);
-
-      // Update current project with new layer
+      // Get the next index for the new layer
       const newLayerIndex = currentProject.layers.length;
-      setCurrentProject({
-        ...currentProject,
-        layers: [
-          ...currentProject.layers,
-          { id: layerId, index: newLayerIndex },
-        ],
+
+      // Record the action before creating the layer
+      await recordAction('add_layer', newLayer.id, null, {
+        ...newLayer,
+        index: newLayerIndex,
       });
 
-      // Update layerData state
-      setLayerData((prev) => [
-        ...prev,
-        { ...newLayer, id: layerId, createdAt: new Date() },
-      ]);
+      const layerId = await createLayer(currentProject.id, newLayer);
+
+      // Get the updated project and layer data
+      const [updatedProject, updatedLayers, updatedActions] = await Promise.all(
+        [
+          getProjectWithLayers(currentProject.id),
+          getProjectLayers(currentProject.id),
+          getProjectActions(currentProject.id),
+        ]
+      );
+
+      // Update all state at once
+      setCurrentProject(updatedProject);
+      setLayerData(updatedLayers);
       setSelectedLayerId(layerId);
+      setActions(updatedActions);
 
       // Update the project's last modified timestamp
       await updateProjectTimestamp(currentProject.id);
@@ -566,22 +595,70 @@ export default function Playground() {
     }
   };
 
-  const handleLayerUpdate = async (updatedLayer: Layer) => {
+  const handleLayerUpdate = async (
+    updatedLayer: Layer,
+    originalLayer?: Layer
+  ) => {
     if (!currentProject) return;
 
     try {
-      // Update the layer in the database
+      // Get the layer's current state before updating if not provided
+      const currentLayer =
+        originalLayer || layerData.find((l) => l.id === updatedLayer.id);
+      if (!currentLayer) return;
+
+      // Only record the action if it's a significant change
+      const hasTransformChange =
+        JSON.stringify(currentLayer.transform) !==
+        JSON.stringify(updatedLayer.transform);
+      const hasStyleChange =
+        currentLayer.type === 'text' &&
+        updatedLayer.type === 'text' &&
+        JSON.stringify(currentLayer.style) !==
+          JSON.stringify(updatedLayer.style);
+      const hasContentChange =
+        currentLayer.type === 'text' &&
+        updatedLayer.type === 'text' &&
+        currentLayer.content !== updatedLayer.content;
+
+      // Check for flip changes
+      const isFlipChange =
+        hasTransformChange &&
+        (currentLayer.transform.scaleX !== updatedLayer.transform.scaleX ||
+          currentLayer.transform.scaleY !== updatedLayer.transform.scaleY);
+
+      // Update the layer in the database first
       await updateLayer(updatedLayer.id, updatedLayer);
 
+      // Record the action only if there's a significant change
+      if (hasTransformChange || hasStyleChange || hasContentChange) {
+        const actionType = isFlipChange
+          ? 'update_transform'
+          : hasTransformChange
+            ? 'update_transform'
+            : hasStyleChange
+              ? 'update_style'
+              : 'update_content';
+
+        await recordAction(
+          actionType,
+          updatedLayer.id,
+          currentLayer,
+          updatedLayer
+        );
+      }
+
       // Get the updated layer data from the database to ensure consistency
-      const [layers, fullProject] = await Promise.all([
+      const [layers, fullProject, updatedActions] = await Promise.all([
         getProjectLayers(currentProject.id),
         getProjectWithLayers(currentProject.id),
+        getProjectActions(currentProject.id),
       ]);
 
       // Update all states in a single batch
       setCurrentProject(fullProject);
       setLayerData(layers);
+      setActions(updatedActions);
 
       // Update the project's last modified timestamp
       await updateProjectTimestamp(currentProject.id);
@@ -651,6 +728,14 @@ export default function Playground() {
     while (attempt < maxRetries) {
       const db = await getDatabase();
       try {
+        // Record the action before making the change
+        await recordAction(
+          'reorder_layers',
+          layerId,
+          currentProject.layers,
+          updatedLayers
+        );
+
         // Use withTransaction helper for proper transaction management
         await withTransaction(db, async () => {
           // Update all layer indices in the database
@@ -666,6 +751,15 @@ export default function Playground() {
 
         // Update the project's last modified timestamp
         await updateProjectTimestamp(currentProject.id);
+
+        // Reload layer data to ensure consistency
+        const [layers, fullProject] = await Promise.all([
+          getProjectLayers(currentProject.id),
+          getProjectWithLayers(currentProject.id),
+        ]);
+
+        setCurrentProject(fullProject);
+        setLayerData(layers);
 
         // If we get here, the operation was successful
         return;
@@ -707,6 +801,22 @@ export default function Playground() {
     const db = await getDatabase();
 
     try {
+      // Get the layer's current state before deleting
+      const layer = layerData.find((l) => l.id === layerId);
+      if (!layer) return;
+
+      const layerIndex = currentProject.layers.find(
+        (l) => l.id === layerId
+      )?.index;
+
+      // Record the action
+      await recordAction(
+        'remove_layer',
+        layerId,
+        { ...layer, index: layerIndex },
+        null
+      );
+
       await withTransaction(db, async () => {
         // Delete layer from the database
         await db.execute('DELETE FROM layers WHERE id = $1', [layerId]);
@@ -736,7 +846,6 @@ export default function Playground() {
         getProjectWithLayers(currentProject.id),
       ]);
 
-      // Update both currentProject and layerData states
       setCurrentProject(updatedProject);
       setLayerData(updatedLayers);
 
@@ -983,7 +1092,7 @@ export default function Playground() {
       // Prepare layers data for export
       const exportLayers: ExportLayer[] = layerData
         .sort((a, b) => compareLayersForRender(a, b, currentProject.layers))
-        .map((layer) => {
+        .map((layer): ExportLayer => {
           const baseLayer = {
             type: layer.type,
             transform: layer.transform,
@@ -992,37 +1101,53 @@ export default function Playground() {
           if (layer.type === 'text') {
             return {
               ...baseLayer,
+              type: 'text' as const,
               content: layer.content,
               style: layer.style,
             };
-          } else if (layer.type === 'image' || layer.type === 'sticker') {
+          } else {
             const assetId =
               layer.type === 'image'
                 ? layer.imageAssetId
                 : layer.stickerAssetId;
             const asset = assetData[assetId];
+            if (!asset?.url) {
+              throw new Error(`Missing asset URL for layer ${layer.id}`);
+            }
             return {
               ...baseLayer,
-              imageUrl: asset?.url,
+              type: layer.type as 'image' | 'sticker',
+              imageUrl: asset.url,
             };
           }
-
-          return baseLayer;
         });
 
       // Prepare background data
-      const background = {
-        type: canvasBackground.type,
-        color: canvasBackground.color,
-        imageUrl: canvasBackground.imageUrl,
-      };
+      const exportBackground = (() => {
+        if (canvasBackground.type === 'color' && canvasBackground.color) {
+          return {
+            type: 'color' as const,
+            color: canvasBackground.color,
+          };
+        } else if (
+          canvasBackground.type === 'image' &&
+          canvasBackground.imageUrl
+        ) {
+          return {
+            type: 'image' as const,
+            imageUrl: canvasBackground.imageUrl,
+          };
+        } else {
+          return { type: 'none' as const };
+        }
+      })();
 
       // Export canvas as image
       const blob = await exportCanvasAsImage(
         exportLayers,
         settings.width,
         settings.height,
-        background
+        exportBackground
       );
 
       // Convert blob to Uint8Array for Tauri
@@ -1053,6 +1178,307 @@ export default function Playground() {
     }
   };
 
+  // Add this function to create and record an action
+  const recordAction = async (
+    type: ActionType,
+    layerId: string,
+    before: unknown,
+    after: unknown
+  ) => {
+    if (!currentProject) return;
+
+    try {
+      console.log('Recording action:', {
+        type,
+        layerId,
+        currentIndex: currentProject.currentActionIndex,
+        actionsLength: actions.length,
+      });
+
+      // Clear any actions after the current index
+      if (currentProject.currentActionIndex < actions.length - 1) {
+        await clearActionsAfterIndex(
+          currentProject.id,
+          currentProject.currentActionIndex
+        );
+      }
+
+      // Create the action
+      await createAction({
+        projectId: currentProject.id,
+        type,
+        layerId,
+        before,
+        after,
+      });
+
+      // Update the project's action index
+      const newIndex = currentProject.currentActionIndex + 1;
+      await updateProjectActionIndex(currentProject.id, newIndex);
+
+      // Get updated actions
+      const updatedActions = await getProjectActions(currentProject.id);
+
+      console.log('After recording action:', {
+        newIndex,
+        actionsLength: updatedActions.length,
+        actions: updatedActions,
+      });
+
+      // Update local state
+      const updatedProject = {
+        ...currentProject,
+        currentActionIndex: newIndex,
+      };
+      setCurrentProject(updatedProject);
+      setActions(updatedActions);
+    } catch (error) {
+      console.error('Failed to record action:', error);
+      toast.error('Failed to record action');
+    }
+  };
+
+  // Add undo/redo handlers
+  const handleUndo = async () => {
+    if (!currentProject || currentProject.currentActionIndex < 0) return;
+
+    try {
+      console.log('Starting undo with:', {
+        currentIndex: currentProject.currentActionIndex,
+        actionsLength: actions.length,
+        action: actions[currentProject.currentActionIndex],
+        allActions: actions,
+      });
+
+      // Validate action index
+      if (currentProject.currentActionIndex >= actions.length) {
+        console.error('Invalid action index:', {
+          currentIndex: currentProject.currentActionIndex,
+          actionsLength: actions.length,
+        });
+        return;
+      }
+
+      const action = actions[currentProject.currentActionIndex];
+      if (!action) {
+        console.error(
+          'No action found at index:',
+          currentProject.currentActionIndex
+        );
+        return;
+      }
+
+      await applyAction(currentProject.id, action, true);
+
+      // Update the project's action index
+      const newIndex = currentProject.currentActionIndex - 1;
+      await updateProjectActionIndex(currentProject.id, newIndex);
+
+      // Update local state
+      const [layers, fullProject] = await Promise.all([
+        getProjectLayers(currentProject.id),
+        getProjectWithLayers(currentProject.id),
+      ]);
+
+      console.log('After undo:', {
+        newIndex,
+        actionsLength: actions.length,
+        fullProjectIndex: fullProject.currentActionIndex,
+        allActions: actions,
+      });
+
+      // Make sure we update the project with the correct action index
+      const updatedProject = {
+        ...fullProject,
+        currentActionIndex: newIndex,
+      };
+
+      setCurrentProject(updatedProject);
+      setLayerData(layers);
+      // Keep the existing actions array instead of fetching new ones
+
+      // Update the project's last modified timestamp
+      await updateProjectTimestamp(currentProject.id);
+    } catch (error) {
+      console.error('Failed to undo:', error);
+      toast.error('Failed to undo');
+    }
+  };
+
+  const handleRedo = async () => {
+    if (!currentProject) return;
+
+    try {
+      console.log('Starting redo with:', {
+        currentIndex: currentProject.currentActionIndex,
+        actionsLength: actions.length,
+        nextAction: actions[currentProject.currentActionIndex + 1],
+        allActions: actions,
+      });
+
+      if (currentProject.currentActionIndex >= actions.length - 1) {
+        console.log('No actions to redo');
+        return;
+      }
+
+      const action = actions[currentProject.currentActionIndex + 1];
+      await applyAction(currentProject.id, action, false);
+
+      // Update the project's action index
+      const newIndex = currentProject.currentActionIndex + 1;
+      await updateProjectActionIndex(currentProject.id, newIndex);
+
+      // Update local state
+      const [layers, fullProject] = await Promise.all([
+        getProjectLayers(currentProject.id),
+        getProjectWithLayers(currentProject.id),
+      ]);
+
+      console.log('After redo:', {
+        newIndex,
+        actionsLength: actions.length,
+        fullProjectIndex: fullProject.currentActionIndex,
+        allActions: actions,
+      });
+
+      // Make sure we update the project with the correct action index
+      const updatedProject = {
+        ...fullProject,
+        currentActionIndex: newIndex,
+      };
+
+      setCurrentProject(updatedProject);
+      setLayerData(layers);
+      // Keep the existing actions array instead of fetching new ones
+
+      // Update the project's last modified timestamp
+      await updateProjectTimestamp(currentProject.id);
+    } catch (error) {
+      console.error('Failed to redo:', error);
+      toast.error('Failed to redo');
+    }
+  };
+
+  // Load actions when project changes
+  useEffect(() => {
+    if (!currentProject?.id) return;
+
+    const loadActions = async () => {
+      try {
+        const projectActions = await getProjectActions(currentProject.id);
+        setActions(projectActions);
+      } catch (error) {
+        console.error('Failed to load actions:', error);
+        toast.error('Failed to load actions');
+      }
+    };
+
+    loadActions();
+  }, [currentProject?.id]);
+
+  // Update the handleSegmentation function
+  const handleSegmentation = async (images: string[]) => {
+    if (!currentProject) return;
+
+    try {
+      // Create new layers for each segmented image
+      for (const imageUrl of images) {
+        // Convert data URL to Uint8Array
+        const response = await fetch(imageUrl);
+        const blob = await response.blob();
+        const arrayBuffer = await blob.arrayBuffer();
+        const data = new Uint8Array(arrayBuffer);
+
+        // Create image asset
+        const assetId = await createImageAsset(
+          'segmented-image.png',
+          'image/png',
+          data
+        );
+
+        // Create blob URL for immediate display
+        const url = URL.createObjectURL(blob);
+
+        // Update assetData state first
+        setAssetData((prev) => ({
+          ...prev,
+          [assetId]: {
+            url,
+            loading: false,
+            error: false,
+          },
+        }));
+
+        // Get image dimensions
+        const img = new Image();
+        const imageSize = await new Promise<{ width: number; height: number }>(
+          (resolve, reject) => {
+            img.onload = () =>
+              resolve({
+                width: img.naturalWidth,
+                height: img.naturalHeight,
+              });
+            img.onerror = reject;
+            img.src = url;
+          }
+        );
+
+        // Create the layer
+        const newLayer = {
+          id: nanoid(),
+          type: 'image' as const,
+          imageAssetId: assetId,
+          transform: {
+            x: 960 - imageSize.width / 2,
+            y: 540 - imageSize.height / 2,
+            width: imageSize.width,
+            height: imageSize.height,
+            rotation: 0,
+            scaleX: 1,
+            scaleY: 1,
+            opacity: 1,
+            blendMode: 'normal',
+          },
+        };
+
+        // Record the action before creating the layer
+        await createAction({
+          projectId: currentProject.id,
+          type: 'add_layer',
+          layerId: newLayer.id,
+          before: null,
+          after: {
+            ...newLayer,
+            index: currentProject.layers.length,
+          },
+        });
+
+        // Create the layer in the database
+        await createLayer(currentProject.id, newLayer);
+      }
+
+      // Get the updated project and layer data
+      const [updatedLayers, updatedProject] = await Promise.all([
+        getProjectLayers(currentProject.id),
+        getProjectWithLayers(currentProject.id),
+      ]);
+
+      // Update all states in a single batch
+      setLayerData(updatedLayers);
+      setCurrentProject(updatedProject);
+      setSelectedLayerId(null); // Deselect any selected layer
+      setCanvasSettingsVersion((v) => v + 1); // Force canvas refresh
+
+      // Update the project's last modified timestamp
+      await updateProjectTimestamp(currentProject.id);
+
+      toast.success(`Added ${images.length} segmented layers`);
+    } catch (error) {
+      console.error('Failed to create segmented layers:', error);
+      toast.error('Failed to create segmented layers');
+    }
+  };
+
   return (
     <main className='w-screen h-screen bg-background text-foreground flex'>
       <SidebarProvider>
@@ -1077,59 +1503,60 @@ export default function Playground() {
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger asChild>
-                            <SidebarMenuButton
-                              onClick={() => handleProjectClick(project)}
-                              className={cn(
-                                currentProject?.id === project.id
-                                  ? 'bg-accent'
-                                  : '',
-                                'group flex justify-between items-center'
-                              )}
-                            >
-                              <div className='flex items-center gap-2'>
-                                <Folder className='w-4 h-4' />
-                                <span>{project.name}</span>
-                              </div>
-                              <AlertDialog>
-                                <AlertDialogTrigger asChild>
-                                  <Button
-                                    variant='ghost'
-                                    size='icon'
-                                    className='h-6 w-6 opacity-0 group-hover:opacity-100 hover:bg-destructive/20 hover:text-destructive'
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                    }}
-                                  >
-                                    <Trash2 className='h-3 w-3' />
-                                  </Button>
-                                </AlertDialogTrigger>
-                                <AlertDialogContent>
-                                  <AlertDialogHeader>
-                                    <AlertDialogTitle>
-                                      Delete Project
-                                    </AlertDialogTitle>
-                                    <AlertDialogDescription>
-                                      Are you sure you want to delete "
-                                      {project.name}"? This action cannot be
-                                      undone.
-                                    </AlertDialogDescription>
-                                  </AlertDialogHeader>
-                                  <AlertDialogFooter>
-                                    <AlertDialogCancel>
-                                      Cancel
-                                    </AlertDialogCancel>
-                                    <AlertDialogAction
-                                      className='bg-destructive hover:bg-destructive/90'
-                                      onClick={() =>
-                                        handleDeleteProject(project)
-                                      }
+                            <span>
+                              <SidebarMenuButton
+                                onClick={() => handleProjectClick(project)}
+                                className={cn(
+                                  currentProject?.id === project.id
+                                    ? 'bg-accent'
+                                    : '',
+                                  'group flex justify-between items-center'
+                                )}
+                              >
+                                <div className='flex items-center gap-2'>
+                                  <Folder className='w-4 h-4' />
+                                  <span>{project.name}</span>
+                                </div>
+                                <AlertDialog>
+                                  <AlertDialogTrigger asChild>
+                                    <span
+                                      role='button'
+                                      className='h-6 w-6 opacity-0 group-hover:opacity-100 hover:bg-destructive/20 hover:text-destructive inline-flex items-center justify-center'
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                      }}
                                     >
-                                      Delete
-                                    </AlertDialogAction>
-                                  </AlertDialogFooter>
-                                </AlertDialogContent>
-                              </AlertDialog>
-                            </SidebarMenuButton>
+                                      <Trash2 className='h-3 w-3' />
+                                    </span>
+                                  </AlertDialogTrigger>
+                                  <AlertDialogContent>
+                                    <AlertDialogHeader>
+                                      <AlertDialogTitle>
+                                        Delete Project
+                                      </AlertDialogTitle>
+                                      <AlertDialogDescription>
+                                        Are you sure you want to delete "
+                                        {project.name}"? This action cannot be
+                                        undone.
+                                      </AlertDialogDescription>
+                                    </AlertDialogHeader>
+                                    <AlertDialogFooter>
+                                      <AlertDialogCancel>
+                                        Cancel
+                                      </AlertDialogCancel>
+                                      <AlertDialogAction
+                                        className='bg-destructive hover:bg-destructive/90'
+                                        onClick={() =>
+                                          handleDeleteProject(project)
+                                        }
+                                      >
+                                        Delete
+                                      </AlertDialogAction>
+                                    </AlertDialogFooter>
+                                  </AlertDialogContent>
+                                </AlertDialog>
+                              </SidebarMenuButton>
+                            </span>
                           </TooltipTrigger>
                           <TooltipContent>
                             <p className='font-medium'>{project.name}</p>
@@ -1214,18 +1641,29 @@ export default function Playground() {
                       onAddImage={handleAddImage}
                       onAddText={handleAddText}
                       onSave={() => {}}
-                      onUndo={() => {}}
-                      onRedo={() => {}}
+                      onUndo={handleUndo}
+                      onRedo={handleRedo}
                       onExport={handleExport}
-                      canUndo={false}
-                      canRedo={false}
+                      canUndo={
+                        actions.length > 0 &&
+                        currentProject?.currentActionIndex >= 0
+                      }
+                      canRedo={
+                        actions.length > 0 &&
+                        currentProject !== undefined &&
+                        currentProject.currentActionIndex < actions.length - 1
+                      }
                       sidebarTrigger={<SidebarTrigger />}
                       onBackgroundColorChange={handleBackgroundColorChange}
                       onBackgroundImageChange={handleBackgroundImageChange}
                       onClearBackground={handleClearBackground}
                       onLayerDelete={handleLayerDelete}
                       onLayerDuplicate={handleLayerDuplicate}
+                      onSegment={handleSegmentation}
+                      assetData={assetData}
                       canvasBackground={canvasBackground}
+                      gridSettings={gridSettings}
+                      onGridSettingsChange={setGridSettings}
                     />
                   </div>
                   <Canvas
@@ -1245,6 +1683,7 @@ export default function Playground() {
                     onBackgroundChange={handleBackgroundChange}
                     zoom={zoom}
                     onZoomChange={handleZoomChange}
+                    gridSettings={gridSettings}
                   />
                 </div>
 
@@ -1253,7 +1692,6 @@ export default function Playground() {
                   <LayerPanelTrigger
                     isOpen={isLayerPanelOpen}
                     onClick={() => setIsLayerPanelOpen(!isLayerPanelOpen)}
-                    triggerRef={layerPanelTriggerRef}
                   />
                   <Button
                     variant='secondary'
@@ -1301,7 +1739,6 @@ export default function Playground() {
                   onLayerDuplicate={handleLayerDuplicate}
                   isOpen={isLayerPanelOpen}
                   onOpenChange={setIsLayerPanelOpen}
-                  triggerRef={layerPanelTriggerRef}
                   assetUrls={Object.fromEntries(
                     Object.entries(assetData)
                       .filter(
