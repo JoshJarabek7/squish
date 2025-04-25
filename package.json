@@ -65,7 +65,7 @@
     "react-dom": "^18.3.1",
     "react-hook-form": "^7.54.2",
     "react-resizable-panels": "^2.1.7",
-    "react-router": "^7.1.5",
+    "react-router": "^7.5.2",
     "recharts": "^2.15.1",
     "runpod-sdk": "^1.0.7",
     "sonner": "^1.7.4",
